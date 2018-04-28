@@ -83,10 +83,10 @@ func (ctx *VMContext) send(deps vmContextSendDeps, to types.Address, method stri
 	// If there's a	bug or even a different implementation that causes this instance of
 	// the actor's state to be different than what's in the state tree for him, we have
 	// a problem: this instance is going to overwrite whatever is in the state tree
-	// when we call deps.Send below (the second thing it does is save both actors; no,
-	// moving the save into the if doesn't help). It doesn't seem safe to both save/load
-	// state to/from the state tree and propagate objects within these vm calls: if we do
-	// both then we'll always have room for error. We should do exclusively one or the other.
+	// when we call deps.Send below (the second thing it does is save both actors). 
+	// It doesn't seem safe to both save/load state to/from the state tree and propagate 
+	// objects within these vm calls: if we do both then we'll always have room for error. 
+	// We should do exclusively one or the other.
 	//
 	// A meta-problem is that we don't have a contract for who saves what, or at least
 	// we don't have one written down. (A proposal is forthcoming.)
