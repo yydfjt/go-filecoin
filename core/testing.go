@@ -160,8 +160,16 @@ var fakeActorExports = Exports{
 		Params: nil,
 		Return: nil,
 	},
-	"nestedBalance": &FunctionSignature{
+	"sendTokens": &FunctionSignature{
 		Params: []abi.Type{abi.Address},
+		Return: nil,
+	},
+	"callSendTokens": &FunctionSignature{
+		Params: []abi.Type{abi.Address, abi.Address},
+		Return: nil,
+	},
+	"attemptMultiSpend": &FunctionSignature{
+		Params: []abi.Type{abi.Address, abi.Address},
 		Return: nil,
 	},
 }
@@ -198,9 +206,37 @@ func (ma *FakeActor) GoodCall(ctx *VMContext) (uint8, error) {
 	return 0, nil
 }
 
-// NestedBalance sents 100 to the given address.
-func (ma *FakeActor) NestedBalance(ctx *VMContext, target types.Address) (uint8, error) {
+// SendTokens sends 100 to the given address.
+func (ma *FakeActor) SendTokens(ctx *VMContext, target types.Address) (uint8, error) {
 	_, code, err := ctx.Send(target, "", types.NewTokenAmount(100), nil)
+	return code, err
+}
+
+// CallSendTokens tells the target to invoke SendTokens to send tokens to the
+// to address (that is, it calls target.SendTokens(to)).
+func (ma *FakeActor) CallSendTokens(ctx *VMContext, target types.Address, to types.Address) (uint8, error) {
+	_, code, err := ctx.Send(target, "sendTokens", types.ZeroToken, []interface{}{to})
+	return code, err
+}
+
+// AttemptMultiSpend attempts to re-spend already spent tokens using two mechanisms.
+func (ma *FakeActor) AttemptMultiSpend(ctx *VMContext, self, target types.Address) (uint8, error) {
+	// This will transfer 100 tokens legitimately.
+	_, code, err := ctx.Send(target, "callSendTokens", types.ZeroToken, []interface{}{self, target})
+	if code != 0 || err != nil {
+		panic(err)
+	}
+	// This will double spend because of problem 1 in combination with problem 2. We
+	// could keep calling this if we wanted.
+	_, code, err = ctx.Send(target, "callSendTokens", types.ZeroToken, []interface{}{self, target})
+	if code != 0 || err != nil {
+		panic(err)
+	}
+	// This will triple spend because of problm 1 (even if we fix 2).
+	code, err = ma.SendTokens(ctx, target)
+	if code != 0 || err != nil {
+		panic(err)
+	}
 	return code, err
 }
 

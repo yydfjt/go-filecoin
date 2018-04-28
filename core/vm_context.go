@@ -56,7 +56,13 @@ func (ctx *VMContext) Send(to types.Address, method string, value *types.TokenAm
 		ToValues:         abi.ToValues,
 	}
 
-	return ctx.send(deps, to, method, value, params)
+	return ctx.send(deps, to, method, value, params) // <== Problem 1
+	// The problem here is re-entrancy. Downstream callees may have modified
+	// the from or to actor's state but we aren't reloading them here to
+	// get the changes. We have a stale copy of the actors. Which is
+	// kind of a bummer if downstream callers transferred value out of them
+	// for example. We should reload here. Some proposals forthcoming for
+	// how to deal with the bigger picture.
 }
 
 type vmContextSendDeps struct {
@@ -72,7 +78,18 @@ func (ctx *VMContext) send(deps vmContextSendDeps, to types.Address, method stri
 	error) {
 	// the message sender is the `to` actor, so this is what we set as `from` in the new message
 	from := ctx.Message().To
-	fromActor := ctx.to
+	fromActor := ctx.to // <== Problem 2
+	// The issue is that we're propagating the to actor from the calling context.
+	// If there's a	bug or even a different implementation that causes this instance of
+	// the actor's state to be different than what's in the state tree for him, we have
+	// a problem: this instance is going to overwrite whatever is in the state tree
+	// when we call deps.Send below (the second thing it does is save both actors; no,
+	// moving the save into the if doesn't help). It doesn't seem safe to both save state to the
+	// state tree and propagate objects: if we do both then we'll always have room for
+	// error. We should do exclusively one or the other.
+	//
+	// A meta-problem is that we don't have a contract for who saves what, or at least
+	// we don't have one written down. (A proposal is forthcoming.)
 
 	vals, err := deps.ToValues(params)
 	if err != nil {
@@ -93,6 +110,7 @@ func (ctx *VMContext) send(deps vmContextSendDeps, to types.Address, method stri
 	toActor, err := deps.GetOrCreateActor(context.TODO(), msg.To, func() (*types.Actor, error) {
 		return NewAccountActor(nil)
 	})
+
 	if err != nil {
 		return nil, 1, faultErrorWrapf(err, "failed to get or create To actor %s", msg.To)
 	}

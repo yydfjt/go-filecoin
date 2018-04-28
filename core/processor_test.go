@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"gx/ipfs/QmcZfnkapfECQGcLZaf9B79NRg7cRa9EnZh4LSbkCzwNvY/go-cid"
@@ -235,7 +236,7 @@ func TestNestedSendBalance(t *testing.T) {
 	// send 100 from addr1 -> addr2, by sending a message from addr0 to addr1
 	params1, err := abi.ToEncodedValues(addr2)
 	assert.NoError(err)
-	msg1 := types.NewMessage(addr0, addr1, 0, nil, "nestedBalance", params1)
+	msg1 := types.NewMessage(addr0, addr1, 0, nil, "sendTokens", params1)
 
 	_, err = attemptApplyMessage(ctx, st, msg1)
 	assert.NoError(err)
@@ -254,4 +255,115 @@ func TestNestedSendBalance(t *testing.T) {
 	})
 
 	assert.True(expStCid.Equals(gotStCid))
+}
+
+func TestReentrantTransferDoesntAllowMultiSpending(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	newAddress := types.NewAddressForTestGetter()
+	ctx := context.Background()
+	cst := hamt.NewCborStore()
+
+	// Install the fake actor so we can execute it.
+	fakeActorCodeCid := types.NewCidForTestGetter()()
+	BuiltinActors[fakeActorCodeCid.KeyString()] = &FakeActor{}
+	defer func() {
+		delete(BuiltinActors, fakeActorCodeCid.KeyString())
+	}()
+
+	// This checks for a re-entrancy problems where an actor's state
+	// isn't reloaded after calling Send(). It needs to be reloaded
+	// after send because a downstream callee could've called back
+	// into the actor thus changing its state (eg, its balance).
+	//
+	// Here's how this works:
+	//  - addr0 is just a trigger because we need to  be in a method
+	//    to do the trick. add0 calls AttemptDoubleSpend on addr1.
+	//  - addr1 has 100 tokens and will triplespend to addr2
+	//  - add2 has 0 tokens.
+	//  - addr1 sends callSendTokens to addr2, which calls back
+	//    into addr1, which calls back into addr2 this time transferring
+	//    100 tokens.
+	//  - we let this call unroll. When we're back in addr1 we do it
+	//    again, transferring another 100 tokens. We could keep doing
+	//    that.
+	//  - we let it unroll and are back in addr1. We do a direct transfer
+	//    of 100 more tokens.
+	//  - add2 has 300 tokens :sadface:
+
+	addr0, addr1, addr2 := newAddress(), newAddress(), newAddress()
+	act0 := RequireNewAccountActor(require, types.NewTokenAmount(0))
+	act1 := RequireNewFakeActorWithTokens(require, fakeActorCodeCid, types.NewTokenAmount(100))
+	act2 := RequireNewFakeActorWithTokens(require, fakeActorCodeCid, types.NewTokenAmount(0))
+
+	_, st := RequireMakeStateTree(require, cst, map[types.Address]*types.Actor{
+		addr0: act0,
+		addr1: act1,
+		addr2: act2,
+	})
+
+	// addr1 will attempt to triple spend to addr2 (params are self, target)
+	params, err := abi.ToEncodedValues(addr1, addr2)
+	assert.NoError(err)
+	msg := types.NewMessage(addr0, addr1, 0, types.ZeroToken, "attemptMultiSpend", params)
+	_, err = attemptApplyMessage(ctx, st, msg)
+	assert.NoError(err)
+	gotStCid, err := st.Flush(ctx)
+	assert.NoError(err)
+
+	expAct0 := RequireNewAccountActor(require, types.NewTokenAmount(0))
+	expAct1 := RequireNewFakeActorWithTokens(require, fakeActorCodeCid, types.NewTokenAmount(0))
+	expAct2 := RequireNewFakeActorWithTokens(require, fakeActorCodeCid, types.NewTokenAmount(100))
+
+	expStCid, _ := RequireMakeStateTree(require, cst, map[types.Address]*types.Actor{
+		addr0: expAct0,
+		addr1: expAct1,
+		addr2: expAct2,
+	})
+
+	// If FakeActor.AttemptDoubleSpend succeeds in double spending this will fail with
+	// addr2 having 300 (instead of 100).
+	assert.True(expStCid.Equals(gotStCid), "State trees differ: %s", diffStateTrees(require, cst, expStCid, gotStCid))
+}
+
+func diffStateTrees(require *require.Assertions, store *hamt.CborIpldStore, st1Cid, st2Cid *cid.Cid) []string {
+	addrs1, actors1, err := types.GetAllActorsFromStore(context.Background(), store, st1Cid)
+	require.NoError(err)
+	addrs2, actors2, err := types.GetAllActorsFromStore(context.Background(), store, st2Cid)
+	require.NoError(err)
+
+	var diffs []string
+	for i, addr := range addrs1 {
+		a := actorForAddress(addr, addrs2, actors2)
+		if a == nil {
+			// TODO if we to print purty actor output we should use actorView from the `actor ls`
+			diffs = append(diffs, fmt.Sprintf("Address %s is in tree1 but not in tree2: %+v", addr, actors1[i]))
+			continue
+		}
+		cid1, err := actors1[i].Cid()
+		require.NoError(err)
+		cid2, err := actors2[i].Cid()
+		require.NoError(err)
+		if !cid1.Equals(cid2) {
+			diffs = append(diffs, fmt.Sprintf("Address %s is different: tree1: %+v, tree2: %+v", addr, actors1[i], actors2[i]))
+		}
+	}
+
+	for i, addr := range addrs2 {
+		a := actorForAddress(addr, addrs1, actors1)
+		if a == nil {
+			diffs = append(diffs, fmt.Sprintf("Address %s is in tree2 but not in tree1: %+v", addr, actors2[i]))
+		}
+	}
+
+	return diffs
+}
+
+func actorForAddress(addr string, addrs []string, actors []*types.Actor) *types.Actor {
+	for i, _ := range addrs {
+		if addrs[i] == addr {
+			return actors[i]
+		}
+	}
+	return nil
 }
