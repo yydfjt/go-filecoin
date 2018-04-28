@@ -271,14 +271,14 @@ func TestReentrantTransferDoesntAllowMultiSpending(t *testing.T) {
 		delete(BuiltinActors, fakeActorCodeCid.KeyString())
 	}()
 
-	// This checks for a re-entrancy problems where an actor's state
+	// This checks for re-entrancy problems where an actor's state
 	// isn't reloaded after calling Send(). It needs to be reloaded
 	// after send because a downstream callee could've called back
 	// into the actor thus changing its state (eg, its balance).
 	//
 	// Here's how this works:
-	//  - addr0 is just a trigger because we need to  be in a method
-	//    to do the trick. add0 calls AttemptDoubleSpend on addr1.
+	//  - addr0 is just a trigger because we need to be in a method
+	//    to do the trick. add0 calls AttemptMultiSpend on addr1.
 	//  - addr1 has 100 tokens and will triplespend to addr2
 	//  - add2 has 0 tokens.
 	//  - addr1 sends callSendTokens to addr2, which calls back
