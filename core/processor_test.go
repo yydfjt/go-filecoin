@@ -321,7 +321,7 @@ func TestReentrantTransferDoesntAllowMultiSpending(t *testing.T) {
 		addr2: expAct2,
 	})
 
-	// If FakeActor.AttemptDoubleSpend succeeds in double spending this will fail with
+	// If FakeActor.AttemptDoubleSpend succeeds in multi spending this will fail with
 	// addr2 having 300 (instead of 100).
 	assert.True(expStCid.Equals(gotStCid), "State trees differ: %s", diffStateTrees(require, cst, expStCid, gotStCid))
 }
