@@ -90,9 +90,9 @@ func TestTriangleEncoding(t *testing.T) {
 			ParentWeight:    1,
 			Height:          2,
 			Nonce:           Uint64(3),
-			Messages:        []*Message{&Message{To: newAddress()}},
+			Messages:        []*Message{{To: newAddress()}},
 			StateRoot:       SomeCid(),
-			MessageReceipts: []*MessageReceipt{&MessageReceipt{ExitCode: 1}},
+			MessageReceipts: []*MessageReceipt{{ExitCode: 1}},
 		}
 		s := reflect.TypeOf(*b)
 		// This check is here to request that you add a non-zero value for new fields

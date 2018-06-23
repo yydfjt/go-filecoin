@@ -43,4 +43,3 @@ func (u *Uint64) UnmarshalJSON(b []byte) error {
 	*u = Uint64(leb128.ToUInt64(jd))
 	return nil
 }
-
