@@ -27,7 +27,7 @@ func TestTriangleEncoding(t *testing.T) {
 	// the second case). It json decodes this ipld node and then decodes the node
 	// into a block (second half of the second case). I don't claim this is ideal,
 	// see: https://github.com/filecoin-project/go-filecoin/issues/599
-	
+
 	newAddress := NewAddressForTestGetter()
 
 	// testRoundTripThatIThinkWeWant := func(t *testing.T, exp *Block) {
