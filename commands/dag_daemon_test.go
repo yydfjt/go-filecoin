@@ -3,7 +3,6 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"testing"
 
 	cbor "gx/ipfs/QmNRz7BDWfdFNVLt7AVvmRefkrURD25EeoipcXqo6yoXU1/go-ipld-cbor"
@@ -46,8 +45,8 @@ func TestDagDaemon(t *testing.T) {
 
 		var actual types.Block
 		err = cbor.DecodeInto(ipldnode.RawData(), &actual)
-		//assert.NoError(err)
-		// TODO ^^
+		// assert.NoError(err)
+		// TODO Enable ^^ and debug why Block.Miner isn't being de/encoded properly.
 
 		// CIDs should be equal
 

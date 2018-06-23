@@ -92,7 +92,7 @@
           "type": "string"
         },
         "nonce": {
-          "type": "integer"
+          "type": "string"
         },
         "params": {
           "oneOf": [
