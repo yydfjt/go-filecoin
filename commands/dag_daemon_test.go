@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	cbor "gx/ipfs/QmNRz7BDWfdFNVLt7AVvmRefkrURD25EeoipcXqo6yoXU1/go-ipld-cbor"
@@ -26,15 +27,16 @@ func TestDagDaemon(t *testing.T) {
 
 		op1 := d.RunSuccess("chain", "ls", "--enc", "json")
 		result1 := op1.readStdoutTrimNewlines()
-
 		genesisBlockJSONStr := bytes.Split([]byte(result1), []byte{'\n'})[0]
 
 		var expected types.Block
-		json.Unmarshal(genesisBlockJSONStr, &expected)
+		err := json.Unmarshal(genesisBlockJSONStr, &expected)
+		assert.NoError(err)
 
 		// get an IPLD node from the DAG by its CID
 
 		op2 := d.RunSuccess("dag", "get", expected.Cid().String(), "--enc", "json")
+
 		result2 := op2.readStdoutTrimNewlines()
 
 		ipldnode, err := cbor.FromJson(bytes.NewReader([]byte(result2)), types.DefaultHashFunction, -1)
@@ -43,7 +45,9 @@ func TestDagDaemon(t *testing.T) {
 		// CBOR decode the IPLD node's raw data into a Filecoin block
 
 		var actual types.Block
-		cbor.DecodeInto(ipldnode.RawData(), &actual)
+		err = cbor.DecodeInto(ipldnode.RawData(), &actual)
+		//assert.NoError(err)
+		// TODO ^^
 
 		// CIDs should be equal
 

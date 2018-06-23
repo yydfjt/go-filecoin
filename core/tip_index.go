@@ -11,11 +11,11 @@ import (
 // tipIndex tracks tipsets by height and parent set, mainly for use in expected consensus.
 type tipIndex map[uint64]tipSetsByParents
 
-func (ti tipIndex) addBlock(b *types.Block) error {
-	tsbp, ok := ti[b.Height]
+func (ti tipIndex) addBlock(b *types.Block) {
+	tsbp, ok := ti[uint64(b.Height)]
 	if !ok {
 		tsbp = tipSetsByParents{}
-		ti[b.Height] = tsbp
+		ti[uint64(b.Height)] = tsbp
 	}
 	return tsbp.addBlock(b)
 }
@@ -100,7 +100,7 @@ func (ts TipSet) AddBlock(b *types.Block) error {
 	if err != nil {
 		return err
 	}
-	if b.Height != h || !b.Parents.Equals(p) || b.ParentWeight != pW {
+	if uint64(b.Height) != h || !b.Parents.Equals(p) || uint64(b.ParentWeight) != pW {
 		return ErrBadTipSetAdd
 	}
 	id := b.Cid()

@@ -31,8 +31,8 @@ func MkChild(blks []*types.Block, parentState state.Tree, stateRoot *cid.Cid, no
 	}
 	return &types.Block{
 		Parents:         parents,
-		Height:          height,
-		ParentWeight:    weight,
+		Height:          types.Uint64(height),
+		ParentWeight:    types.Uint64(weight),
 		Nonce:           nonce,
 		StateRoot:       stateRoot,
 		Messages:        []*types.Message{},
@@ -193,13 +193,13 @@ func NewChainWithMessages(store *hamt.CborIpldStore, root TipSet, msgSets ...[][
 	}
 
 	for _, tsMsgs := range msgSets {
-		height, _ := parents.Height()
+		height, _ := uint64(parents.Height())
 		ts := TipSet{}
 		// If a message set does not contain a slice of messages then
 		// add a tipset with no messages and a single block to the chain
 		if len(tsMsgs) == 0 {
 			child := &types.Block{
-				Height:  height + 1,
+				Height:  types.Uint64(height + 1),
 				Parents: parents.ToSortedCidSet(),
 			}
 			MustPut(store, child)
@@ -209,7 +209,7 @@ func NewChainWithMessages(store *hamt.CborIpldStore, root TipSet, msgSets ...[][
 			child := &types.Block{
 				Messages: msgs,
 				Parents:  parents.ToSortedCidSet(),
-				Height:   height + 1,
+				Height:   types.Uint64(height + 1),
 			}
 			MustPut(store, child)
 			ts[child.Cid().String()] = child

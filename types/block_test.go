@@ -1,13 +1,86 @@
 package types
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"math/rand"
+	"reflect"
 	"testing"
 	"time"
 
+	cbor "gx/ipfs/QmRiRJhn427YVuufBEHofLreKWNw7P7BWNq86Sb9kzqdbd/go-ipld-cbor"
+
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestTriangleEncoding(t *testing.T) {
+	// We want to be sure that:
+	//      Block => json => Block
+	// yields exactly the same thing as:
+	//      Block => CBOR => json => Block
+	// because we want the encoding of a Block from memory (first case)
+	// to be exactly the same as the encoding of a Block from storage
+	// (second case). This happens for example if you dump the best
+	// block via command (first case) and then dag get it (second case).
+
+	newAddress := NewAddressForTestGetter()
+	testRountTrip := func(t *testing.T, exp *Block) {
+		assert := assert.New(t)
+		require := require.New(t)
+
+		jb, err := json.Marshal(exp)
+		require.NoError(err)
+		var jsonRoundTrip Block
+		err = json.Unmarshal(jb, &jsonRoundTrip)
+		require.NoError(err)
+
+		ipldNodeOrig, err := cbor.DumpObject(exp)
+		assert.NoError(err)
+		jin, err := json.Marshal(ipldNodeOrig)
+		require.NoError(err)
+		fmt.Printf("\njson=%s\n", string(jin))
+		ipldNodeFromJSON, err := cbor.FromJSON(bytes.NewReader([]byte(jin)), DefaultHashFunction, -1)
+		require.NoError(err)
+		// TODO ^^
+		var cborJSONRoundTrip Block
+		//err = cbor.DecodeInto(ipldNodeFromJSON.RawData(), &cborJSONRoundTrip)
+		err = cbor.DecodeInto(ipldNodeOrig, &cborJSONRoundTrip)
+		j, e := ipldNodeFromJSON.MarshalJSON()
+		assert.NoError(e)
+		fmt.Printf("\nipld nodew =%s\n", string(j))
+		assert.NoError(err)
+
+		fmt.Printf("\n%+v\n%+v\n", jsonRoundTrip, cborJSONRoundTrip)
+		AssertHaveSameCid(assert, &jsonRoundTrip, &cborJSONRoundTrip)
+	}
+
+	t.Run("encoding block with zero fields works", func(t *testing.T) {
+		testRountTrip(t, &Block{})
+	})
+
+	t.Run("encoding block with nonzero fields works", func(t *testing.T) {
+		// We should ensure that every field is set -- zero values might
+		// pass when non-zero values do not due to nil/null encoding.
+		b := &Block{
+			Miner:           newAddress(),
+			Ticket:          Bytes([]byte{0x01, 0x02, 0x03}),
+			Parents:         NewSortedCidSet(SomeCid()),
+			ParentWeight:    1,
+			Height:          2,
+			Nonce:           Uint64(3),
+			Messages:        []*Message{&Message{To: newAddress()}},
+			StateRoot:       SomeCid(),
+			MessageReceipts: []*MessageReceipt{&MessageReceipt{ExitCode: 1}},
+		}
+		s := reflect.TypeOf(*b)
+		// This check is here to request that you add a non-zero value for new fields
+		// to the above (and update the field count below).
+		require.Equal(t, 9, s.NumField())
+		testRountTrip(t, b)
+	})
+}
 
 func TestBlockIsParentOf(t *testing.T) {
 	var p, c Block
@@ -29,9 +102,9 @@ func TestBlockScore(t *testing.T) {
 			n := uint64(source.Int63())
 
 			var b Block
-			b.Height = n
+			b.Height = Uint64(n)
 
-			assert.Equal(b.Height, b.Score(), "block height: %d - block score %d", b.Height, b.Score())
+			assert.Equal(uint64(b.Height), b.Score(), "block height: %d - block score %d", b.Height, b.Score())
 		}
 	})
 }
@@ -50,6 +123,7 @@ func TestDecodeBlock(t *testing.T) {
 		assert.NoError(err)
 
 		before := &Block{
+			Miner:     addrGetter(),
 			Parents:   NewSortedCidSet(c1),
 			Height:    2,
 			Messages:  []*Message{m1, m2},
@@ -83,8 +157,8 @@ func TestEquals(t *testing.T) {
 	c2, err := cidFromString("b")
 	assert.NoError(err)
 
-	var n1 uint64 = 1234
-	var n2 uint64 = 9876
+	var n1 Uint64 = 1234
+	var n2 Uint64 = 9876
 
 	b1 := &Block{Parents: NewSortedCidSet(c1), Nonce: n1}
 	b2 := &Block{Parents: NewSortedCidSet(c1), Nonce: n1}
@@ -101,8 +175,9 @@ func TestBlockJsonMarshal(t *testing.T) {
 	assert := assert.New(t)
 
 	var parent, child Block
+	child.Miner = NewAddressForTestGetter()()
 	child.Height = 1
-	child.Nonce = 2
+	child.Nonce = Uint64(2)
 	child.Parents = NewSortedCidSet(parent.Cid())
 	child.StateRoot = parent.Cid()
 

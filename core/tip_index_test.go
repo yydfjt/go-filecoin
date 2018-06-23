@@ -18,8 +18,8 @@ func block(require *require.Assertions, height int, parentCid *cid.Cid, parentWe
 
 	return &types.Block{
 		Parents:         types.NewSortedCidSet(parentCid),
-		ParentWeight:    parentWeight,
-		Height:          42 + uint64(height),
+		ParentWeight:    types.Uint64(parentWeight),
+		Height:          types.Uint64(42 + uint64(height)),
 		Nonce:           7,
 		Messages:        []*types.Message{m1},
 		StateRoot:       types.SomeCid(),
@@ -257,9 +257,9 @@ func TestTipIndex(t *testing.T) {
 
 	contains := func(b *types.Block, expectedHeightEntries, expectedParentSetEntries, expectedBlocks int) {
 		assert.Equal(expectedHeightEntries, len(idx))
-		assert.Equal(expectedParentSetEntries, len(idx[b.Height]))
-		assert.Equal(expectedBlocks, len(idx[b.Height][keyForParentSet(b.Parents)]))
-		assert.True(b.Cid().Equals(idx[b.Height][keyForParentSet(b.Parents)][b.Cid().String()].Cid()))
+		assert.Equal(expectedParentSetEntries, len(idx[uint64(b.Height)]))
+		assert.Equal(expectedBlocks, len(idx[uint64(b.Height)][keyForParentSet(b.Parents)]))
+		assert.True(b.Cid().Equals(idx[uint64(b.Height)][keyForParentSet(b.Parents)][b.Cid().String()].Cid()))
 	}
 
 	cidGetter := types.NewCidForTestGetter()
