@@ -36,27 +36,27 @@ func TestTriangleEncoding(t *testing.T) {
 	// assert := assert.New(t)
 	// require := require.New(t)
 	//
-	// // Simulate first half of the dag_daemon_test above.
-	// jb, err := json.Marshal(exp)
-	// require.NoError(err)
-	// var jsonRoundTrip Block
-	// err = json.Unmarshal(jb, &jsonRoundTrip)
-	// require.NoError(err)
+    // // Simulate first half of the dag_daemon_test above.
+    // jb, err := json.Marshal(exp)
+    // require.NoError(err)
+    // var jsonRoundTrip Block
+    // err = json.Unmarshal(jb, &jsonRoundTrip)
+    // require.NoError(err)
 
-	// // Simulate the second half.
-	// cborRaw, err := cbor.DumpObject(exp)
-	// assert.NoError(err)
-	// ipldNodeOrig, err := cbor.Decode(cborRaw, DefaultHashFunction, -1)
-	// assert.NoError(err)
-	// jin, err := json.Marshal(ipldNodeOrig)
-	// require.NoError(err)
-	// ipldNodeFromJSON, err := cbor.FromJSON(bytes.NewReader(jin), DefaultHashFunction, -1)
-	// require.NoError(err)
-	// var cborJSONRoundTrip Block
-	// err = cbor.DecodeInto(ipldNodeFromJSON.RawData(), &cborJSONRoundTrip)
-	// assert.NoError(err)
-	//
-	// AssertHaveSameCid(assert, &jsonRoundTrip, &cborJSONRoundTrip)
+    // // Simulate the second half.
+    // cborRaw, err := cbor.DumpObject(exp)
+    // assert.NoError(err)
+    // ipldNodeOrig, err := cbor.Decode(cborRaw, DefaultHashFunction, -1)
+    // assert.NoError(err)
+    // jin, err := json.Marshal(ipldNodeOrig)
+    // require.NoError(err)
+    // ipldNodeFromJSON, err := cbor.FromJSON(bytes.NewReader(jin), DefaultHashFunction, -1)
+    // require.NoError(err)
+    // var cborJSONRoundTrip Block
+    // err = cbor.DecodeInto(ipldNodeFromJSON.RawData(), &cborJSONRoundTrip)
+    // assert.NoError(err)
+    //
+    // AssertHaveSameCid(assert, &jsonRoundTrip, &cborJSONRoundTrip)
 	// }
 
 	testRoundTrip := func(t *testing.T, exp *Block) {
