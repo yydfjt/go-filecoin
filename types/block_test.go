@@ -53,7 +53,7 @@ func TestTriangleEncoding(t *testing.T) {
 	// 	var cborJSONRoundTrip Block
 	// 	err = cbor.DecodeInto(ipldNodeFromJSON.RawData(), &cborJSONRoundTrip)
 	// 	assert.NoError(err)
-    //
+	//
 	// 	AssertHaveSameCid(assert, &jsonRoundTrip, &cborJSONRoundTrip)
 	// }
 
