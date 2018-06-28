@@ -17,7 +17,7 @@ func TestTriangleEncoding(t *testing.T) {
 	// We want to be sure that:
 	//      Block => json => Block
 	// yields exactly the same thing as:
-	//      Block => IPLD node => json => IPLD node => Block (!)
+	//      Block => IPLD node => CBOR => IPLD node => json => IPLD node => Block (!)
 	// because we want the output encoding of a Block directly from memory
 	// (first case) to be exactly the same as the output encoding of a Block from
 	// storage (second case). WTF you might say, and you would not be wrong. The
@@ -42,21 +42,22 @@ func TestTriangleEncoding(t *testing.T) {
 	// 	require.NoError(err)
 
 	// 	// Simulate the second half.
-	// 	ipldNodeOrig, err := cbor.DumpObject(exp)
-	// 	assert.NoError(err)
-	// 	jin, err := json.Marshal(ipldNodeOrig)
+	//  cborRaw, err := cbor.DumpObject(exp)
+	//  assert.NoError(err)
+	//  ipldNodeOrig, err := cbor.Decode(cborRaw, DefaultHashFunction, -1)
+	//  assert.NoError(err)
+	//  jin, err := json.Marshal(ipldNodeOrig)
 	// 	require.NoError(err)
 	// 	ipldNodeFromJSON, err := cbor.FromJSON(bytes.NewReader(jin), DefaultHashFunction, -1)
 	// 	require.NoError(err)
 	// 	var cborJSONRoundTrip Block
 	// 	err = cbor.DecodeInto(ipldNodeFromJSON.RawData(), &cborJSONRoundTrip)
 	// 	assert.NoError(err)
-	// 	// Fails here ^^ with "malformed stream: invalid appearance of string token; expected start of map"
-
+    //
 	// 	AssertHaveSameCid(assert, &jsonRoundTrip, &cborJSONRoundTrip)
 	// }
 
-	testRountTrip := func(t *testing.T, exp *Block) {
+	testRoundTrip := func(t *testing.T, exp *Block) {
 		assert := assert.New(t)
 		require := require.New(t)
 
@@ -77,7 +78,7 @@ func TestTriangleEncoding(t *testing.T) {
 	}
 
 	t.Run("encoding block with zero fields works", func(t *testing.T) {
-		testRountTrip(t, &Block{})
+		testRoundTrip(t, &Block{})
 	})
 
 	t.Run("encoding block with nonzero fields works", func(t *testing.T) {
@@ -98,7 +99,7 @@ func TestTriangleEncoding(t *testing.T) {
 		// This check is here to request that you add a non-zero value for new fields
 		// to the above (and update the field count below).
 		require.Equal(t, 9, s.NumField())
-		testRountTrip(t, b)
+		testRoundTrip(t, b)
 	})
 }
 
