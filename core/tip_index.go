@@ -11,7 +11,7 @@ import (
 // tipIndex tracks tipsets by height and parent set, mainly for use in expected consensus.
 type tipIndex map[uint64]tipSetsByParents
 
-func (ti tipIndex) addBlock(b *types.Block) {
+func (ti tipIndex) addBlock(b *types.Block) error {
 	tsbp, ok := ti[uint64(b.Height)]
 	if !ok {
 		tsbp = tipSetsByParents{}
@@ -171,7 +171,7 @@ func (ts TipSet) Height() (uint64, error) {
 	if len(ts) == 0 {
 		return uint64(0), ErrEmptyTipSet
 	}
-	return ts.ToSlice()[0].Height, nil
+	return uint64(ts.ToSlice()[0].Height), nil
 }
 
 // Parents returns the parents of a tipset.
@@ -187,7 +187,7 @@ func (ts TipSet) ParentWeight() (uint64, error) {
 	if len(ts) == 0 {
 		return uint64(0), ErrEmptyTipSet
 	}
-	return ts.ToSlice()[0].ParentWeight, nil
+	return uint64(ts.ToSlice()[0].ParentWeight), nil
 }
 
 // BaseBlockFromTipSets is a likely TEMPORARY helper to extract a base block

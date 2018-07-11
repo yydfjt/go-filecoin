@@ -96,7 +96,7 @@ func (b blockGenerator) Generate(ctx context.Context, baseTipSet core.TipSet, ti
 		Messages:        res.SuccessfulMessages,
 		MessageReceipts: receipts,
 		Parents:         baseTipSet.ToSortedCidSet(),
-		ParentWeight:    weight,
+		ParentWeight:    types.Uint64(weight),
 		StateRoot:       newStateTreeCid,
 		Ticket:          ticket,
 	}

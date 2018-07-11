@@ -45,7 +45,7 @@
           ]
         },
         "parentWeight": {
-          "type": "number"
+          "type": "string"
         },
         "stateRoot": {
           "$ref": "#/definitions/Cid"

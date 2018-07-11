@@ -133,8 +133,8 @@ func TestGenerateMultiBlockTipSet(t *testing.T) {
 	assert.NoError(err)
 
 	assert.Len(blk.Messages, 1) // This is the mining reward.
-	assert.Equal(uint64(101), blk.Height)
-	assert.Equal(uint64(1020.0), blk.ParentWeight)
+	assert.Equal(types.Uint64(101), blk.Height)
+	assert.Equal(types.Uint64(1020), blk.ParentWeight)
 }
 
 // After calling Generate, do the new block and new state of the message pool conform to our expectations?

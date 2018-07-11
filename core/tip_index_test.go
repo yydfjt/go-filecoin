@@ -123,7 +123,7 @@ func TestTipSetAddBlock(t *testing.T) {
 	b2.Parents = b1.Parents
 
 	// Invalid weight
-	b2.ParentWeight = uint64(3)
+	b2.ParentWeight = types.Uint64(3)
 	ts = TipSet{}
 	RequireTipSetAdd(require, b1, ts)
 	err = ts.AddBlock(b2)
@@ -160,7 +160,7 @@ func TestNewTipSet(t *testing.T) {
 	b1.Parents = b2.Parents
 
 	// Invalid parent weights
-	b1.ParentWeight = uint64(3)
+	b1.ParentWeight = types.Uint64(3)
 	ts, err = NewTipSet(b1, b2, b3)
 	assert.EqualError(err, ErrBadTipSetCreate.Error())
 	assert.Nil(ts)
