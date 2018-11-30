@@ -11,17 +11,17 @@ jobs:
           name: Configure environment variables
           command: |
             echo 'export PATH="/usr/local/go/bin:${HOME}/.cargo/bin:${PATH}:${HOME}/go/bin"' >> $BASH_ENV
-#            echo 'export GOPATH="${HOME}/go"' >> $BASH_ENV
+            echo 'export GOPATH="${HOME}/go"' >> $BASH_ENV
             echo 'export FILECOIN_PARAMETER_CACHE="${HOME}/filecoin-proof-parameters/"' >> $BASH_ENV
       - add_ssh_keys:
           fingerprints:
               - "1e:73:c5:15:75:e0:e4:98:54:3c:2b:9e:e8:94:14:2e"
-
       - checkout
-
-      - run: git submodule update --init
-
-      - run: git rev-parse @:./proofs/rust-proofs > /tmp/rust-proofs-checksum.txt
+      - run:
+          name: Update submodules
+          command: git submodule update --init
+      - run:
+          command: git rev-parse @:./proofs/rust-proofs > /tmp/rust-proofs-checksum.txt
       - restore_cache:
           key: v5-go-deps-{{ arch }}-{{ checksum  "~/go/src/github.com/filecoin-project/go-filecoin/build/main.go" }}-{{ checksum "~/go/src/github.com/filecoin-project/go-filecoin/package.json" }}-{{ checksum "/tmp/rust-proofs-checksum.txt" }}
 
@@ -41,9 +41,11 @@ jobs:
       - run: go version
       - run:
           name: Install Rust
-          command: curl https://sh.rustup.rs -sSf | sh -s -- -y
-
-      - run:  go run ./build/*.go smartdeps
+          command: |
+            curl https://sh.rustup.rs -sSf | sh -s -- -y
+      - run:
+          name: Install dependencies
+          command: go run ./build/*.go smartdeps
       - save_cache:
           key: v5-go-deps-{{ arch }}-{{ checksum  "~/go/src/github.com/filecoin-project/go-filecoin/build/main.go" }}-{{ checksum "~/go/src/github.com/filecoin-project/go-filecoin/package.json" }}-{{ checksum "/tmp/rust-proofs-checksum.txt" }}
           paths:
@@ -129,7 +131,9 @@ jobs:
           command: |
             (sudo apt-get update && sudo apt-get install -y clang libssl-dev && which cargo && which rustc) || (curl https://sh.rustup.rs -sSf | sh -s -- -y)
 
-      - run: go run ./build/*.go smartdeps
+      - run:
+          name: Install Dependencies
+          command: go run ./build/*.go smartdeps
 
       - save_cache:
           key: v5-go-deps-{{ arch }}-{{ checksum  "build/main.go" }}-{{ checksum "package.json" }}-{{ checksum "/tmp/rust-proofs-checksum.txt" }}
