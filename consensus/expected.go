@@ -280,10 +280,8 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts TipSet,
 			return errors.New("invalid proof")
 		}
 
-		computedTicket := CreateTicket(blk.Proof, blk.Miner)
-
-		if !bytes.Equal(blk.Ticket, computedTicket) {
-			return errors.New("ticket incorrectly computed")
+		if !IsValidTicket(blk.Proof, blk.Miner, blk.Ticket) {
+			return errors.New("ticket is not a valid signature")
 		}
 
 		// TODO: Also need to validate BlockSig
@@ -299,6 +297,12 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts TipSet,
 		}
 	}
 	return nil
+}
+
+// IsValidTicket checks that the signature over the proof is valid.
+func IsValidTicket(proof proofs.PoStProof, signerAddress address.Address, ticket types.Signature) bool {
+	proofHash := sha256.Sum256(proof[:])
+	return types.IsValidSignature(proofHash[:], signerAddress, ticket)
 }
 
 // IsWinningTicket fetches miner power & total power, returns true if it's a winning ticket, false if not,
@@ -347,19 +351,6 @@ func CreateChallengeSeed(parents TipSet, nullBlkCount uint64) (proofs.PoStChalle
 
 	h := sha256.Sum256(buf)
 	return h, nil
-}
-
-// CreateTicket computes a valid ticket using the supplied proof
-// []byte and the minerAddress address.Address.
-//    returns:  []byte -- the ticket.
-func CreateTicket(proof proofs.PoStProof, minerAddr address.Address) []byte {
-	// TODO: the ticket is supposed to be a signature, per the spec.
-	// For now to ensure that the ticket is unique to each miner mix in
-	// the miner address.
-	// https://github.com/filecoin-project/go-filecoin/issues/1054
-	buf := append(proof[:], minerAddr.Bytes()...)
-	h := sha256.Sum256(buf)
-	return h[:]
 }
 
 // runMessages applies the messages of all blocks within the input

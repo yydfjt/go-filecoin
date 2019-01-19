@@ -63,8 +63,9 @@ type MessageApplier interface {
 
 // DefaultWorker runs a mining job.
 type DefaultWorker struct {
-	createPoST DoSomeWorkFunc  // TODO: rename createPoSTFunc
-	minerAddr  address.Address // TODO: needs to be a key in the near future
+	createPoSTFunc DoSomeWorkFunc
+	minerAddr      address.Address // TODO: needs to be a key in the near future
+	signer         types.Signer
 
 	// consensus things
 	getStateTree GetStateTree
@@ -80,25 +81,37 @@ type DefaultWorker struct {
 }
 
 // NewDefaultWorker instantiates a new Worker.
-func NewDefaultWorker(messagePool *core.MessagePool, getStateTree GetStateTree, getWeight GetWeight, processor MessageApplier, powerTable consensus.PowerTableView, bs blockstore.Blockstore, cst *hamt.CborIpldStore, miner address.Address, bt time.Duration) *DefaultWorker {
-	w := NewDefaultWorkerWithDeps(messagePool, getStateTree, getWeight, processor, powerTable, bs, cst, miner, bt, func() {})
-	w.createPoST = w.fakeCreatePoST
+func NewDefaultWorker(messagePool *core.MessagePool, getStateTree GetStateTree, getWeight GetWeight, processor MessageApplier, powerTable consensus.PowerTableView, bs blockstore.Blockstore, cst *hamt.CborIpldStore, miner address.Address, signer types.Signer, bt time.Duration) *DefaultWorker {
+	w := NewDefaultWorkerWithDeps(messagePool, getStateTree, getWeight, processor, powerTable, bs, cst, miner, signer, bt, func() {})
+	w.createPoSTFunc = w.fakeCreatePoST
 	return w
 }
 
 // NewDefaultWorkerWithDeps instantiates a new Worker with custom functions.
-func NewDefaultWorkerWithDeps(messagePool *core.MessagePool, getStateTree GetStateTree, getWeight GetWeight, processor MessageApplier, powerTable consensus.PowerTableView, bs blockstore.Blockstore, cst *hamt.CborIpldStore, miner address.Address, bt time.Duration, createPoST DoSomeWorkFunc) *DefaultWorker {
+func NewDefaultWorkerWithDeps(
+	messagePool *core.MessagePool,
+	getStateTree GetStateTree,
+	getWeight GetWeight,
+	processor MessageApplier,
+	powerTable consensus.PowerTableView,
+	bs blockstore.Blockstore,
+	cst *hamt.CborIpldStore,
+	miner address.Address,
+	signer types.Signer,
+	bt time.Duration,
+	createPoST DoSomeWorkFunc) *DefaultWorker {
 	return &DefaultWorker{
-		getStateTree: getStateTree,
-		getWeight:    getWeight,
-		messagePool:  messagePool,
-		processor:    processor,
-		powerTable:   powerTable,
-		blockstore:   bs,
-		cstore:       cst,
-		createPoST:   createPoST,
-		minerAddr:    miner,
-		blockTime:    bt,
+		getStateTree:   getStateTree,
+		getWeight:      getWeight,
+		messagePool:    messagePool,
+		processor:      processor,
+		powerTable:     powerTable,
+		blockstore:     bs,
+		cstore:         cst,
+		createPoSTFunc: createPoST,
+		minerAddr:      miner,
+		signer:         signer,
+		blockTime:      bt,
 	}
 }
 
@@ -137,7 +150,7 @@ func (w *DefaultWorker) Mine(ctx context.Context, base consensus.TipSet, nullBlk
 		outCh <- Output{Err: err}
 		return false
 	}
-	prCh := createProof(challenge, w.createPoST)
+	prCh := createProof(challenge, w.createPoSTFunc)
 
 	var proof proofs.PoStProof
 	var ticket []byte
@@ -151,10 +164,10 @@ func (w *DefaultWorker) Mine(ctx context.Context, base consensus.TipSet, nullBlk
 			return false
 		}
 		copy(proof[:], prChRead[:])
-		ticket = consensus.CreateTicket(proof, w.minerAddr)
+		ticket = CreateTicket(proof, w.minerAddr, w.signer)
 	}
 
-	// TODO: Test the interplay of isWinningTicket() and createPoST()
+	// TODO: Test the interplay of isWinningTicket() and createPoSTFunc()
 	weHaveAWinner, err := consensus.IsWinningTicket(ctx, w.blockstore, w.powerTable, st, ticket, w.minerAddr)
 
 	if err != nil {
@@ -185,6 +198,20 @@ func createProof(challengeSeed proofs.PoStChallengeSeed, createPoST DoSomeWorkFu
 		c <- challengeSeed
 	}()
 	return c
+}
+
+// CreateTicket computes a valid ticket using the supplied proof
+// []byte and the minerAddress address.Address.
+//    returns:  []byte -- the ticket.
+func CreateTicket(proof proofs.PoStProof, minerAddr address.Address, signer types.Signer) []byte {
+	buf := append(proof[:])
+	h := buf
+
+	ticket, err := signer.SignBytes(h[:], minerAddr)
+	if err != nil {
+		panic("This should never happen")
+	}
+	return ticket
 }
 
 // fakeCreatePoST is the default implementation of DoSomeWorkFunc.

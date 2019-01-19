@@ -2,6 +2,7 @@ package mining
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"testing"
@@ -42,7 +43,7 @@ func Test_Mine(t *testing.T) {
 
 	outCh := make(chan Output)
 	doSomeWorkCalled := false
-	worker.createPoST = func() { doSomeWorkCalled = true }
+	worker.createPoSTFunc = func() { doSomeWorkCalled = true }
 	go worker.Mine(ctx, tipSet, 0, outCh)
 	r := <-outCh
 	assert.NoError(r.Err)
@@ -53,7 +54,7 @@ func Test_Mine(t *testing.T) {
 	worker = NewDefaultWorker(pool, makeExplodingGetStateTree(st), getWeightTest, th.NewTestProcessor(), NewTestPowerTableView(1), bs, cst, addrs[3], th.BlockTimeTest)
 	outCh = make(chan Output)
 	doSomeWorkCalled = false
-	worker.createPoST = func() { doSomeWorkCalled = true }
+	worker.createPoSTFunc = func() { doSomeWorkCalled = true }
 	go worker.Mine(ctx, tipSet, 0, outCh)
 	r = <-outCh
 	assert.Error(r.Err)
@@ -65,7 +66,7 @@ func Test_Mine(t *testing.T) {
 	worker = NewDefaultWorker(pool, getStateTree, getWeightTest, th.NewTestProcessor(), NewTestPowerTableView(1), bs, cst, addrs[3], th.BlockTimeTest)
 	outCh = make(chan Output)
 	doSomeWorkCalled = false
-	worker.createPoST = func() { doSomeWorkCalled = true }
+	worker.createPoSTFunc = func() { doSomeWorkCalled = true }
 	input := consensus.TipSet{}
 	go worker.Mine(ctx, input, 0, outCh)
 	r = <-outCh
@@ -82,6 +83,22 @@ func TestGenerate(t *testing.T) {
 	// TODO use core.FakeActor for state/contract tests for generate:
 	//  - test nonces out of order
 	//  - test nonce gap
+}
+
+func Test_createTicket(t *testing.T) {
+	ki := types.MustGenerateKeyInfo(1, types.GenerateKeyInfoSeed())
+	mockSigner := types.NewMockSigner(ki)
+	minerAddr := mockSigner.Addresses[0]
+
+	t.Run("CreateTicket generates a valid signature for the proof", func(t *testing.T) {
+		postProof := th.MakeRandomPoSTProofForTest()
+		ticket := CreateTicket(postProof, minerAddr, mockSigner)
+		proofHash := sha256.Sum256(postProof[:])
+		assert.True(t, types.IsValidSignature(proofHash[:], minerAddr, ticket))
+	})
+	t.Run("CreateTicket does not panic if something goes wrong", func(t *testing.T) {
+	})
+
 }
 
 func sharedSetupInitial() (*hamt.CborIpldStore, *core.MessagePool, cid.Cid) {

@@ -3,7 +3,6 @@ package consensus_test
 import (
 	"context"
 	"encoding/hex"
-
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/consensus"
@@ -13,13 +12,13 @@ import (
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gx/ipfs/QmcTzQXRcU2vf8yX5EEboz1BSvWC7wWmeYAKVQmhp8WZYU/sha256-simd"
 
 	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
 	"gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
 	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
 	"gx/ipfs/QmYPZzd9VqmJDwxUnThfeSbV1Y5o53aVPDijTB7j7rS9Ep/go-blockservice"
 	"gx/ipfs/QmYZwey1thDTynSrvd6qQkX24UpTka6TFhQ2v569UpoqxD/go-ipfs-exchange-offline"
-	"gx/ipfs/QmcTzQXRcU2vf8yX5EEboz1BSvWC7wWmeYAKVQmhp8WZYU/sha256-simd"
 	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
 	"testing"
 )
@@ -87,10 +86,11 @@ func TestExpected_NewValidTipSet(t *testing.T) {
 }
 
 func makeSomeBlocks(pTipSet consensus.TipSet) []*types.Block {
+	ticket := types.Signature("SOMETHING")
 	blocks := []*types.Block{
-		testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, address.MakeTestAddress("foo")),
-		testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, address.MakeTestAddress("bar")),
-		testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, address.MakeTestAddress("bazz")),
+		testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, address.MakeTestAddress("foo"), ticket),
+		testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, address.MakeTestAddress("bar"), ticket),
+		testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, address.MakeTestAddress("bazz"), ticket),
 	}
 	return blocks
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/actor/builtin/storagemarket"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/consensus"
+	"github.com/filecoin-project/go-filecoin/mining"
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/repo"
 	"github.com/filecoin-project/go-filecoin/state"
@@ -107,7 +108,8 @@ func MkFakeChildCore(parent consensus.TipSet,
 
 	pIDs := parent.ToSortedCidSet()
 
-	newBlock := th.NewValidTestBlockFromTipSet(parent, height, minerAddress)
+	ticket := types.Signature("ABCDEFG")
+	newBlock := th.NewValidTestBlockFromTipSet(parent, height, minerAddress, ticket)
 
 	// Override fake values with our values
 	newBlock.Parents = pIDs
@@ -290,6 +292,7 @@ func RequireMineOnce(ctx context.Context,
 }
 
 // MakeProofAndWinningTicket generates a proof and ticket that will pass validateMining.
+// FIXME: return a minerAddr???
 func MakeProofAndWinningTicket(minerAddr address.Address, minerPower uint64, totalPower uint64) (proofs.PoStProof, types.Signature, error) {
 	var postProof proofs.PoStProof
 	var ticket types.Signature
@@ -299,8 +302,9 @@ func MakeProofAndWinningTicket(minerAddr address.Address, minerPower uint64, tot
 	}
 
 	for {
+		signer := types.MockSigner{}
 		postProof = th.MakeRandomPoSTProofForTest()
-		ticket = consensus.CreateTicket(postProof, minerAddr)
+		ticket = mining.CreateTicket(postProof, minerAddr, signer)
 		if consensus.CompareTicketPower(ticket, minerPower, totalPower) {
 			return postProof, ticket, nil
 		}
