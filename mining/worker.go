@@ -6,6 +6,7 @@ package mining
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/filecoin-project/go-filecoin/address"
@@ -81,8 +82,28 @@ type DefaultWorker struct {
 }
 
 // NewDefaultWorker instantiates a new Worker.
-func NewDefaultWorker(messagePool *core.MessagePool, getStateTree GetStateTree, getWeight GetWeight, processor MessageApplier, powerTable consensus.PowerTableView, bs blockstore.Blockstore, cst *hamt.CborIpldStore, miner address.Address, signer types.Signer, bt time.Duration) *DefaultWorker {
-	w := NewDefaultWorkerWithDeps(messagePool, getStateTree, getWeight, processor, powerTable, bs, cst, miner, signer, bt, func() {})
+func NewDefaultWorker(messagePool *core.MessagePool,
+	getStateTree GetStateTree,
+	getWeight GetWeight,
+	processor MessageApplier,
+	powerTable consensus.PowerTableView,
+	bs blockstore.Blockstore,
+	cst *hamt.CborIpldStore,
+	miner address.Address,
+	signer types.Signer,
+	bt time.Duration) *DefaultWorker {
+	w := NewDefaultWorkerWithDeps(messagePool,
+		getStateTree,
+		getWeight,
+		processor,
+		powerTable,
+		bs,
+		cst,
+		miner,
+		signer,
+		bt,
+		func() {})
+	// TODO: make a real createPoST function
 	w.createPoSTFunc = w.fakeCreatePoST
 	return w
 }
@@ -99,7 +120,7 @@ func NewDefaultWorkerWithDeps(
 	miner address.Address,
 	signer types.Signer,
 	bt time.Duration,
-	createPoST DoSomeWorkFunc) *DefaultWorker {
+	createPoSTFunc DoSomeWorkFunc) *DefaultWorker {
 	return &DefaultWorker{
 		getStateTree:   getStateTree,
 		getWeight:      getWeight,
@@ -108,7 +129,7 @@ func NewDefaultWorkerWithDeps(
 		powerTable:     powerTable,
 		blockstore:     bs,
 		cstore:         cst,
-		createPoSTFunc: createPoST,
+		createPoSTFunc: createPoSTFunc,
 		minerAddr:      miner,
 		signer:         signer,
 		blockTime:      bt,
@@ -209,7 +230,8 @@ func CreateTicket(proof proofs.PoStProof, minerAddr address.Address, signer type
 
 	ticket, err := signer.SignBytes(h[:], minerAddr)
 	if err != nil {
-		panic("This should never happen")
+		errMsg := fmt.Sprintf("SignBytes error in CreateTicket: %s", err.Error())
+		panic(errMsg)
 	}
 	return ticket
 }

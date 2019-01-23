@@ -3,6 +3,8 @@ package node
 import (
 	"context"
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/mining"
+	"github.com/filecoin-project/go-filecoin/protocol/storage"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/testhelpers"
 	"testing"
@@ -10,8 +12,6 @@ import (
 
 	"gx/ipfs/QmPiemjiKBC9VA7vZF82m4x1oygtg2c2YVqag8PX7dN1BD/go-libp2p-peerstore"
 
-	"github.com/filecoin-project/go-filecoin/consensus"
-	"github.com/filecoin-project/go-filecoin/protocol/storage"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,6 +65,9 @@ func TestBlockPropsManyNodes(t *testing.T) {
 	require.NotNil(t, baseTS)
 	proof := testhelpers.MakeRandomPoSTProofForTest()
 
+	// minerOwnerAddr? because
+	minerOwnerAddr, err := minerNode.MiningOwnerAddress(ctx, minerAddr)
+	require.NoError(t, err)
 	nextBlk := &types.Block{
 		Miner:        minerAddr,
 		Parents:      baseTS.ToSortedCidSet(),
@@ -72,7 +75,7 @@ func TestBlockPropsManyNodes(t *testing.T) {
 		ParentWeight: types.Uint64(10000),
 		StateRoot:    baseTS.ToSlice()[0].StateRoot,
 		Proof:        proof,
-		Ticket:       consensus.CreateTicket(proof, minerAddr),
+		Ticket:       mining.CreateTicket(proof, minerOwnerAddr, minerNode.Wallet),
 	}
 
 	// Wait for network connection notifications to propagate
@@ -106,9 +109,9 @@ func TestChainSync(t *testing.T) {
 	defer stopNodes(nodes)
 
 	baseTS := nodes[0].ChainReader.Head()
-	nextBlk1 := testhelpers.NewValidTestBlockFromTipSet(baseTS, 1, minerAddr)
-	nextBlk2 := testhelpers.NewValidTestBlockFromTipSet(baseTS, 2, minerAddr)
-	nextBlk3 := testhelpers.NewValidTestBlockFromTipSet(baseTS, 3, minerAddr)
+	nextBlk1 := testhelpers.NewValidTestBlockFromTipSet(baseTS, 1, minerAddr, types.Signature("foo"))
+	nextBlk2 := testhelpers.NewValidTestBlockFromTipSet(baseTS, 2, minerAddr, types.Signature("bar"))
+	nextBlk3 := testhelpers.NewValidTestBlockFromTipSet(baseTS, 3, minerAddr, types.Signature("bazz"))
 
 	assert.NoError(nodes[0].AddNewBlock(ctx, nextBlk1))
 	assert.NoError(nodes[0].AddNewBlock(ctx, nextBlk2))
@@ -147,10 +150,17 @@ func makeNodes(ctx context.Context, t *testing.T, assertions *assert.Assertions,
 		PeerKeyOpt(PeerKeys[0]),
 		AutoSealIntervalSecondsOpt(1),
 	)
-	seed.GiveKey(t, minerNode, 0)
+	// ??
+	ownerAddr := seed.GiveKey(t, minerNode, 0)
+	require.NotNil(t, ownerAddr)
 	mineraddr, minerOwnerAddr := seed.GiveMiner(t, minerNode, 0)
 	_, err := storage.NewMiner(ctx, mineraddr, minerOwnerAddr, minerNode, minerNode.Repo.DealsDatastore(), minerNode.PlumbingAPI)
 	assertions.NoError(err)
+
+	storageMiner, err := storage.NewMiner(ctx, mineraddr, minerOwnerAddr, minerNode, minerNode.Repo.MinerDealsDatastore(), minerNode.Repo.DealsAwaitingSealDatastore(), minerNode.PlumbingAPI)
+	assert.NotNil(t, storageMiner)
+	minerNode.StorageMiner = storageMiner
+	assert.NoError(t, err)
 
 	nodes := []*Node{minerNode}
 
@@ -161,5 +171,6 @@ func makeNodes(ctx context.Context, t *testing.T, assertions *assert.Assertions,
 	for i := 0; i < nodeLimit; i++ {
 		nodes = append(nodes, MakeNodeWithChainSeed(t, seed, configOpts))
 	}
+
 	return mineraddr, nodes
 }

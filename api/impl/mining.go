@@ -54,7 +54,9 @@ func (api *nodeMining) Once(ctx context.Context) (*types.Block, error) {
 		return nd.Consensus.Weight(ctx, ts, pSt)
 	}
 
-	worker := mining.NewDefaultWorker(nd.MsgPool, getState, getWeight, consensus.NewDefaultProcessor(), nd.PowerTable, nd.Blockstore, nd.CborStore(), miningAddr, blockTime)
+	worker := mining.NewDefaultWorker(nd.MsgPool, getState, getWeight, consensus.NewDefaultProcessor(),
+		nd.PowerTable, nd.Blockstore, nd.CborStore(), miningAddr,
+		nd.Wallet, blockTime)
 
 	res, err := mining.MineOnce(ctx, worker, mineDelay, ts)
 	if err != nil {

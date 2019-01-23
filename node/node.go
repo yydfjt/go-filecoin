@@ -773,8 +773,9 @@ func (node *Node) StartMining(ctx context.Context) error {
 			}
 			return node.Consensus.Weight(ctx, ts, pSt)
 		}
+
 		processor := consensus.NewDefaultProcessor()
-		worker := mining.NewDefaultWorker(node.MsgPool, getState, getWeight, processor, node.PowerTable, node.Blockstore, node.CborStore(), minerAddr, blockTime)
+		worker := mining.NewDefaultWorker(node.MsgPool, getState, getWeight, processor, node.PowerTable, node.Blockstore, node.CborStore(), minerAddr, node.Wallet, blockTime)
 		node.MiningScheduler = mining.NewScheduler(worker, mineDelay, node.ChainReader.Head)
 	}
 

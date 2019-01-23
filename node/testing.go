@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"sync"
 	"testing"
 
 	"gx/ipfs/QmNiJiXwWE3kRhZrC5ej3kSjWHm337pYfhjLGSCDNKJP2s/go-libp2p-crypto"
@@ -19,20 +18,17 @@ import (
 	"gx/ipfs/QmYZwey1thDTynSrvd6qQkX24UpTka6TFhQ2v569UpoqxD/go-ipfs-exchange-offline"
 	ds "gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
 
-	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/chain"
 	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/gengen/util"
 	"github.com/filecoin-project/go-filecoin/lookup"
-	"github.com/filecoin-project/go-filecoin/mining"
 	"github.com/filecoin-project/go-filecoin/plumbing"
 	"github.com/filecoin-project/go-filecoin/plumbing/cfg"
 	"github.com/filecoin-project/go-filecoin/plumbing/msg"
 	"github.com/filecoin-project/go-filecoin/plumbing/mthdsig"
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/repo"
-	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/testhelpers"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/wallet"
@@ -239,76 +235,6 @@ func configureFakeVerifier(cfo []ConfigOpt) []ConfigOpt {
 	return append(cfo, VerifierConfigOption(verifier))
 }
 
-// RunCreateMiner runs create miner and then runs a given assertion with the result.
-func RunCreateMiner(t *testing.T, node *Node, from address.Address, pledge uint64, pid peer.ID, collateral types.AttoFIL) chan MustCreateMinerResult {
-	resultChan := make(chan MustCreateMinerResult)
-	require := require.New(t)
-
-	if !node.ChainReader.GenesisCid().Defined() {
-		panic("must initialize with genesis block first")
-	}
-
-	ctx := context.Background()
-
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-
-	subscription, err := node.PubSub.Subscribe(msg.Topic)
-	require.NoError(err)
-
-	go func() {
-		minerAddr, err := node.CreateMiner(ctx, from, types.NewGasPrice(0), types.NewGasUnits(0), pledge, pid, &collateral)
-		resultChan <- MustCreateMinerResult{MinerAddress: minerAddr, Err: err}
-		wg.Done()
-	}()
-
-	// wait for create miner call to put a message in the pool
-	_, err = subscription.Next(ctx)
-	require.NoError(err)
-	getStateFromKey := func(ctx context.Context, tsKey string) (state.Tree, error) {
-		tsas, err := node.ChainReader.GetTipSetAndState(ctx, tsKey)
-		if err != nil {
-			return nil, err
-		}
-		return state.LoadStateTree(ctx, node.CborStore(), tsas.TipSetStateRoot, builtin.Actors)
-	}
-	getStateTree := func(ctx context.Context, ts consensus.TipSet) (state.Tree, error) {
-		return getStateFromKey(ctx, ts.String())
-	}
-	getWeight := func(ctx context.Context, ts consensus.TipSet) (uint64, error) {
-		parent, err := ts.Parents()
-		if err != nil {
-			return uint64(0), err
-		}
-		// TODO handle genesis cid more gracefully
-		if parent.Len() == 0 {
-			return node.Consensus.Weight(ctx, ts, nil)
-		}
-		pSt, err := getStateFromKey(ctx, parent.String())
-		if err != nil {
-			return uint64(0), err
-		}
-		return node.Consensus.Weight(ctx, ts, pSt)
-	}
-
-	w := mining.NewDefaultWorker(node.MsgPool, getStateTree, getWeight, consensus.NewDefaultProcessor(), node.PowerTable, node.Blockstore, node.CborStore(), address.TestAddress, testhelpers.BlockTimeTest)
-	cur := node.ChainReader.Head()
-	out, err := mining.MineOnce(ctx, w, mining.MineDelayTest, cur)
-	require.NoError(err)
-	require.NoError(out.Err)
-	outTS := testhelpers.RequireNewTipSet(require, out.NewBlock)
-	chainStore, ok := node.ChainReader.(chain.Store)
-	require.True(ok)
-	tsas := &chain.TipSetAndState{
-		TipSet:          outTS,
-		TipSetStateRoot: out.NewBlock.StateRoot,
-	}
-	require.NoError(chainStore.PutTipSetAndState(ctx, tsas))
-	require.NoError(chainStore.SetHead(ctx, outTS))
-	return resultChan
-}
-
 // resetNodeGen resets the genesis block of the input given node using the gif
 // function provided.
 // Note: this is an awful way to test the node. This function duplicates to a large
@@ -400,10 +326,17 @@ var TestGenCfg = &gengen.GenesisCfg{
 // GenNode allows you to completely configure a node for testing.
 func GenNode(t *testing.T, tno *TestNodeOptions) *Node {
 	r := repo.NewInMemoryRepo()
+
 	r.Config().Swarm.Address = "/ip4/0.0.0.0/tcp/0"
 	if !tno.OfflineMode {
 		r.Config().Swarm.Address = "/ip4/127.0.0.1/tcp/0"
 	}
+
+	backend, err := wallet.NewDSBackend(r.WalletDatastore())
+	if err != nil {
+		panic("Could not set up wallet backend")
+	}
+
 	// set a random port here so things don't break in the event we make
 	// a parallel request
 	// TODO: can we use port 0 yet?
@@ -434,6 +367,7 @@ func GenNode(t *testing.T, tno *TestNodeOptions) *Node {
 	})
 
 	nd, err := New(context.Background(), localCfgOpts...)
+	nd.Wallet = wallet.New(backend)
 
 	require.NoError(t, err)
 	return nd
