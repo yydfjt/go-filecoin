@@ -118,10 +118,8 @@ func (sma *Actor) CreateMiner(vmctx exec.VMContext, pledge *big.Int, publicKey [
 			return nil, Errors[ErrPledgeTooLow]
 		}
 
-		addr, err := vmctx.AddressForNewActor()
-		if err != nil {
-			return nil, errors.FaultErrorWrap(err, "could not get address for new actor")
-		}
+		addrHash := address.Hash(publicKey)
+		addr := address.NewMainnet(addrHash)
 
 		if vmctx.Message().Value.LessThan(MinimumCollateral(pledge)) {
 			return nil, Errors[ErrInsufficientCollateral]
@@ -132,7 +130,7 @@ func (sma *Actor) CreateMiner(vmctx exec.VMContext, pledge *big.Int, publicKey [
 			return nil, err
 		}
 
-		_, _, err = vmctx.Send(addr, "", vmctx.Message().Value, nil)
+		_, _, err := vmctx.Send(addr, "", vmctx.Message().Value, nil)
 		if err != nil {
 			return nil, err
 		}

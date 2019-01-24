@@ -958,11 +958,15 @@ func (node *Node) CreateMiner(ctx context.Context, accountAddr address.Address, 
 	}()
 
 	// TODO: make this more streamlined in the wallet
-	backend, err := node.Wallet.Find(accountAddr)
+
+	// Generate a new public/private key pair for the miner actor.
+	minerAddr, err := node.NewAddress()
 	if err != nil {
 		return nil, err
 	}
-	info, err := backend.GetKeyInfo(accountAddr)
+
+	backend, err := node.Wallet.Find(minerAddr)
+	info, err := backend.GetKeyInfo(minerAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -976,27 +980,26 @@ func (node *Node) CreateMiner(ctx context.Context, accountAddr address.Address, 
 		return nil, err
 	}
 
-	var minerAddress address.Address
 	err = node.PlumbingAPI.MessageWait(ctx, smsgCid, func(blk *types.Block, smsg *types.SignedMessage,
 		receipt *types.MessageReceipt) error {
 		if receipt.ExitCode != uint8(0) {
 			return vmErrors.VMExitCodeToError(receipt.ExitCode, storagemarket.Errors)
 		}
-		minerAddress, err = address.NewFromBytes(receipt.Return[0])
+		_, err = address.NewFromBytes(receipt.Return[0])
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	err = node.saveMinerAddressToConfig(minerAddress)
+	err = node.saveMinerAddressToConfig(minerAddr)
 	if err != nil {
-		return &minerAddress, err
+		return &minerAddr, err
 	}
 
 	err = node.setupMining(ctx)
 
-	return &minerAddress, err
+	return &minerAddr, err
 }
 
 func (node *Node) saveMinerAddressToConfig(addr address.Address) error {
