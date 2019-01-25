@@ -291,24 +291,24 @@ func RequireMineOnce(ctx context.Context,
 	return b
 }
 
-// MakeProofAndWinningTicket generates a proof and ticket that will pass validateMining.
-// FIXME: return a minerAddr???
-func MakeProofAndWinningTicket(minerAddr address.Address, minerPower uint64, totalPower uint64) (proofs.PoStProof, types.Signature, error) {
-	var postProof proofs.PoStProof
+
+// MakeProofAndWinningTicket generates a proof and ticket that will pass validateMining as above, except you provide the signer.
+func MakeProofAndWinningTicket(minerAddr address.Address, minerPower uint64, totalPower uint64, signer types.Signer) (proofs.PoStProof, types.Signature, error) {
 	var ticket types.Signature
+	var postProof proofs.PoStProof
 
 	if totalPower/minerPower > 100000 {
 		return postProof, ticket, errors.New("MakeProofAndWinningTicket: minerPower is too small for totalPower to generate a winning ticket")
 	}
 
 	for {
-		signer := types.MockSigner{}
 		postProof = th.MakeRandomPoSTProofForTest()
 		ticket = mining.CreateTicket(postProof, minerAddr, signer)
 		if consensus.CompareTicketPower(ticket, minerPower, totalPower) {
 			return postProof, ticket, nil
 		}
 	}
+
 }
 
 // These peer.ID generators were copied from libp2p/go-testutil. We didn't bring in the

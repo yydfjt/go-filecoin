@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/chain"
 	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/state"
@@ -42,6 +43,12 @@ func TestExpected_NewValidTipSet(t *testing.T) {
 	cistore, bstore, verifier := setupCborBlockstoreProofs()
 	ptv := testhelpers.NewTestPowerTableView(1, 5)
 
+	numBlocks := 3
+
+	var seed = types.GenerateKeyInfoSeed()
+	ki := types.MustGenerateKeyInfo(numBlocks, seed)
+	mockSigner := types.NewMockSigner(ki)
+
 	t.Run("NewValidTipSet returns a tipset + nil (no errors) when valid blocks", func(t *testing.T) {
 
 		genesisBlock, err := consensus.InitGenesis(cistore, bstore)
@@ -52,7 +59,7 @@ func TestExpected_NewValidTipSet(t *testing.T) {
 		pTipSet, err := exp.NewValidTipSet(ctx, []*types.Block{genesisBlock})
 		require.NoError(err)
 
-		blocks := makeSomeBlocks(pTipSet)
+		blocks := makeSomeBlocks(t, pTipSet, &mockSigner)
 
 		tipSet, err := exp.NewValidTipSet(ctx, blocks)
 		assert.NoError(err)
@@ -85,13 +92,18 @@ func TestExpected_NewValidTipSet(t *testing.T) {
 	})
 }
 
-func makeSomeBlocks(pTipSet consensus.TipSet) []*types.Block {
-	ticket := types.Signature("SOMETHING")
-	blocks := []*types.Block{
-		testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, address.MakeTestAddress("foo"), ticket),
-		testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, address.MakeTestAddress("bar"), ticket),
-		testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, address.MakeTestAddress("bazz"), ticket),
+// makeSomeBlocks makes one block for each address in mockSigner
+func makeSomeBlocks(t *testing.T, pTipSet consensus.TipSet, mockSigner *types.MockSigner) []*types.Block {
+	var blocks []*types.Block
+
+	for _, addr := range mockSigner.Addresses {
+		proof, ticket, err := chain.MakeProofAndWinningTicket(addr, 1, 100, mockSigner)
+		require.NoError(t, err)
+		blk := testhelpers.NewValidTestBlockFromTipSet(pTipSet, 1, addr, ticket)
+		blk.Proof = proof
+		blocks = append(blocks, blk)
 	}
+
 	return blocks
 }
 
@@ -108,6 +120,11 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 	genesisBlock, err := consensus.InitGenesis(cistore, bstore)
 	require.NoError(err)
 
+	numBlocks := 3
+
+	ki := types.MustGenerateKeyInfo(numBlocks, types.GenerateKeyInfoSeed())
+	mockSigner := types.NewMockSigner(ki)
+
 	t.Run("passes the validateMining section when given valid mining blocks", func(t *testing.T) {
 
 		minerPower := uint64(1)
@@ -119,7 +136,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		pTipSet, err := exp.NewValidTipSet(ctx, []*types.Block{genesisBlock})
 		require.NoError(err)
 
-		blocks := makeSomeBlocks(pTipSet)
+		blocks := makeSomeBlocks(t, pTipSet, &mockSigner)
 
 		tipSet, err := exp.NewValidTipSet(ctx, blocks)
 		require.NoError(err)
@@ -139,7 +156,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 		pTipSet, err := exp.NewValidTipSet(ctx, []*types.Block{genesisBlock})
 		require.NoError(err)
 
-		blocks := makeSomeBlocks(pTipSet)
+		blocks := makeSomeBlocks(t, pTipSet, &mockSigner)
 
 		tipSet, err := exp.NewValidTipSet(ctx, blocks)
 		require.NoError(err)
