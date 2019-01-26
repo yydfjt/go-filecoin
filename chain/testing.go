@@ -255,10 +255,16 @@ func RequireMineOnce(ctx context.Context,
 	})
 	require.NoError(err)
 
+	var seed = types.GenerateKeyInfoSeed()
+	ki := types.MustGenerateKeyInfo(1, seed)
+	mockSigner := types.NewMockSigner(ki)
+
 	// proofs & tickets for minerPower = 0 aren't needed
 	if minerPower > 0 {
-		b.Proof, b.Ticket, err = MakeProofAndWinningTicket(rewardAddress, minerPower, totalPower)
+		b.Proof, b.Ticket, err = MakeProofAndWinningTicket(rewardAddress, minerPower, totalPower, mockSigner)
 		require.NoError(err)
+	} else {
+		// TODO: what else to do?
 	}
 
 	// Get the updated state root after applying messages.
@@ -290,7 +296,6 @@ func RequireMineOnce(ctx context.Context,
 
 	return b
 }
-
 
 // MakeProofAndWinningTicket generates a proof and ticket that will pass validateMining as above, except you provide the signer.
 func MakeProofAndWinningTicket(minerAddr address.Address, minerPower uint64, totalPower uint64, signer types.Signer) (proofs.PoStProof, types.Signature, error) {

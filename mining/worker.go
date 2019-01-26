@@ -6,6 +6,7 @@ package mining
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"time"
 
@@ -225,8 +226,7 @@ func createProof(challengeSeed proofs.PoStChallengeSeed, createPoST DoSomeWorkFu
 // []byte and the minerAddress address.Address.
 //    returns:  []byte -- the ticket.
 func CreateTicket(proof proofs.PoStProof, minerAddr address.Address, signer types.Signer) []byte {
-	buf := append(proof[:])
-	h := buf
+	h := sha256.Sum256(proof[:])
 
 	ticket, err := signer.SignBytes(h[:], minerAddr)
 	if err != nil {

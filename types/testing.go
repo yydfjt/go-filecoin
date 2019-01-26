@@ -3,6 +3,7 @@ package types
 import (
 	"crypto/ecdsa"
 	"fmt"
+	"github.com/pkg/errors"
 
 	"github.com/stretchr/testify/assert"
 
@@ -69,12 +70,27 @@ func (ms MockSigner) SignBytes(data []byte, addr address.Address) (Signature, er
 		panic("unknown address")
 	}
 
-	sk, err := crypto.BytesToECDSA(ki.PrivateKey)
+	//sk, err := crypto.BytesToECDSA(ki.PrivateKey)
+	sk, _, err := keysFromInfo(&ki)
 	if err != nil {
 		return Signature{}, err
 	}
 
 	return wutil.Sign(sk, data)
+}
+
+func keysFromInfo(ki *KeyInfo) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
+	// Developer error if we add a new type and don't update this method
+	if ki.Type() != SECP256K1 {
+		panic(fmt.Sprintf("unknown key type %s", ki.Type()))
+	}
+
+	prv, err := crypto.BytesToECDSA(ki.Key())
+	if err != nil {
+		return nil, nil, errors.New("failed to unmarshal private key")
+	}
+
+	return prv, &prv.PublicKey, nil
 }
 
 // NewSignedMessageForTestGetter returns a closure that returns a SignedMessage unique to that invocation.

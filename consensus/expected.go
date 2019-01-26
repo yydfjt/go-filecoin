@@ -30,7 +30,9 @@ var (
 
 func init() {
 	ticketDomain = &big.Int{}
-	ticketDomain.Exp(big.NewInt(2), big.NewInt(256), nil)
+	// The size of the ticket domain must equal the size of the Signature (ticket) generated.
+	// Currently this is secp256.Sign signature which is 65 bytes.
+	ticketDomain.Exp(big.NewInt(2), big.NewInt(65*8), nil)
 	ticketDomain.Sub(ticketDomain, big.NewInt(1))
 }
 
@@ -118,6 +120,9 @@ func (c *Expected) NewValidTipSet(ctx context.Context, blks []*types.Block) (Tip
 func (c *Expected) validateBlockStructure(ctx context.Context, b *types.Block) error {
 	// TODO: validate signature on block
 	ctx = log.Start(ctx, "Expected.validateBlockStructure")
+	if b == nil {
+		return errors.New("nil block")
+	}
 	log.LogKV(ctx, "ValidateBlockStructure", b.Cid().String())
 	if !b.StateRoot.Defined() {
 		return fmt.Errorf("block has nil StateRoot")
@@ -264,6 +269,10 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts TipSet,
 		parentHeight, err := parentTs.Height()
 		if err != nil {
 			return errors.Wrap(err, "failed to get parentHeight")
+		}
+
+		if parentHeight > uint64(blk.Height) {
+			return errors.New("parent height > block height")
 		}
 
 		nullBlockCount := uint64(blk.Height) - parentHeight - 1

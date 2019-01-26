@@ -43,10 +43,8 @@ func TestExpected_NewValidTipSet(t *testing.T) {
 	cistore, bstore, verifier := setupCborBlockstoreProofs()
 	ptv := testhelpers.NewTestPowerTableView(1, 5)
 
-	numBlocks := 3
-
 	var seed = types.GenerateKeyInfoSeed()
-	ki := types.MustGenerateKeyInfo(numBlocks, seed)
+	ki := types.MustGenerateKeyInfo(3, seed)
 	mockSigner := types.NewMockSigner(ki)
 
 	t.Run("NewValidTipSet returns a tipset + nil (no errors) when valid blocks", func(t *testing.T) {
@@ -120,9 +118,7 @@ func TestExpected_RunStateTransition_validateMining(t *testing.T) {
 	genesisBlock, err := consensus.InitGenesis(cistore, bstore)
 	require.NoError(err)
 
-	numBlocks := 3
-
-	ki := types.MustGenerateKeyInfo(numBlocks, types.GenerateKeyInfoSeed())
+	ki := types.MustGenerateKeyInfo(3, types.GenerateKeyInfoSeed())
 	mockSigner := types.NewMockSigner(ki)
 
 	t.Run("passes the validateMining section when given valid mining blocks", func(t *testing.T) {
