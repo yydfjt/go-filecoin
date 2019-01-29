@@ -6,7 +6,6 @@ package mining
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
+	"github.com/filecoin-project/go-filecoin/wallet/util"
 
 	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
 	"gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
@@ -226,7 +226,7 @@ func createProof(challengeSeed proofs.PoStChallengeSeed, createPoST DoSomeWorkFu
 // []byte and the minerAddress address.Address.
 //    returns:  []byte -- the ticket.
 func CreateTicket(proof proofs.PoStProof, minerAddr address.Address, signer types.Signer) []byte {
-	h := sha256.Sum256(proof[:])
+	h := walletutil.Sum256(proof[:])
 
 	ticket, err := signer.SignBytes(h[:], minerAddr)
 	if err != nil {

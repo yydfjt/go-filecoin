@@ -174,31 +174,40 @@ func CreateMinerWithPower(ctx context.Context,
 	power uint64,
 	cst *hamt.CborIpldStore,
 	bs bstore.Blockstore,
-	genCid cid.Cid) (address.Address, *types.Block, uint64, error) {
+	genCid cid.Cid) (address.Address, *types.Block, *types.MockSigner, uint64, error) {
 	require := require.New(t)
 
 	pledge := power
-	if pledge == uint64(0) {
+	if pledge < uint64(10) {
 		pledge = uint64(10)
 	}
 	var bigIntPledge big.Int
 	bigIntPledge.SetUint64(pledge)
 
-	// create miner
-	msg, err := th.CreateMinerMessage(sn.Addresses[0], nonce, pledge, RequireRandomPeerID(), storagemarket.MinimumCollateral(&bigIntPledge))
+	// set up public/private key pair for the new miner
+	ki := types.MustGenerateKeyInfo(1, types.GenerateKeyInfoSeed())
+	ms := types.NewMockSigner(ki)
+	minerAddr := ms.Addresses[0]
+	minerKeyInfo := ms.AddrKeyInfo[minerAddr]
+	pubKey, err := minerKeyInfo.PublicKey()
+	require.NoError(err)
+
+	// generate message for creating a miner
+	msg, err := th.CreateMinerMessage(sn.Addresses[0], nonce, pledge, pubKey, RequireRandomPeerID(), storagemarket.MinimumCollateral(&bigIntPledge))
 	require.NoError(err)
 
 	ptv := th.NewTestPowerTableView(power, 1000)
 
-	b := RequireMineOnce(ctx, t, syncer, cst, bs, lastBlock, rewardAddress, []*types.SignedMessage{mockSign(sn, msg)}, ptv, genCid)
+	// simulate the rewardAddress actor mining a block with this message in it
+	b := RequireMineOnce(ctx, t, syncer, cst, bs,
+		lastBlock, rewardAddress, []*types.SignedMessage{mockSign(sn, msg)},
+		ptv, genCid, sn)
 	nonce++
 
 	require.Equal(uint8(0), b.MessageReceipts[0].ExitCode)
-	minerAddr, err := address.NewFromBytes(b.MessageReceipts[0].Return[0])
-	require.NoError(err)
 
 	if power == uint64(0) {
-		return minerAddr, b, nonce, nil
+		return minerAddr, b, &ms, nonce, nil
 	}
 
 	// TODO: We should obtain the SectorID from the SectorBuilder instead of
@@ -215,12 +224,12 @@ func CreateMinerWithPower(ctx context.Context,
 		nonce++
 	}
 
-	b = RequireMineOnce(ctx, t, syncer, cst, bs, b, rewardAddress, msgs, ptv, genCid)
+	b = RequireMineOnce(ctx, t, syncer, cst, bs, b, rewardAddress, msgs, ptv, genCid, sn)
 	for _, r := range b.MessageReceipts {
 		require.Equal(uint8(0), r.ExitCode)
 	}
 
-	return minerAddr, b, nonce, nil
+	return minerAddr, b, &ms, nonce, nil
 }
 
 // RequireMineOnce process one block and panic on error.
@@ -234,7 +243,8 @@ func RequireMineOnce(ctx context.Context,
 	rewardAddress address.Address,
 	msgs []*types.SignedMessage,
 	ptv consensus.PowerTableView,
-	genCid cid.Cid) *types.Block {
+	genCid cid.Cid,
+	mockSigner types.MockSigner) *types.Block {
 	require := require.New(t)
 
 	// Make a block for processing.
@@ -255,17 +265,10 @@ func RequireMineOnce(ctx context.Context,
 	})
 	require.NoError(err)
 
-	var seed = types.GenerateKeyInfoSeed()
-	ki := types.MustGenerateKeyInfo(1, seed)
-	mockSigner := types.NewMockSigner(ki)
-
-	// proofs & tickets for minerPower = 0 aren't needed
-	if minerPower > 0 {
-		b.Proof, b.Ticket, err = MakeProofAndWinningTicket(rewardAddress, minerPower, totalPower, mockSigner)
-		require.NoError(err)
-	} else {
-		// TODO: what else to do?
-	}
+	// this excepted making a proof & ticket when power == 0, but this fails now because we require
+	// a valid signature.
+	b.Proof, b.Ticket, err = MakeProofAndWinningTicket(rewardAddress, minerPower, totalPower, mockSigner)
+	require.NoError(err)
 
 	// Get the updated state root after applying messages.
 	st, err := state.LoadStateTree(ctx, cst, lastBlock.StateRoot, builtin.Actors)

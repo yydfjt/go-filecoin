@@ -11,20 +11,19 @@ import (
 
 // Sign cryptographically signs `data` using the private key `priv`.
 func Sign(priv *ecdsa.PrivateKey, data []byte) ([]byte, error) {
-	hash := blake2b.Sum256(data)
+	hash := Sum256(data)
 	// sign the content
 	sig, err := crypto.Sign(hash[:], priv)
 	if err != nil {
 		return nil, errors.Wrap(err, "Failed to sign data")
 	}
-
 	return sig, nil
 }
 
 // Verify cryptographically verifies that 'sig' is the signed hash of 'data' with
 // the public key `pk`.
 func Verify(pk, data, signature []byte) (bool, error) {
-	hash := blake2b.Sum256(data)
+	hash := Sum256(data)
 	// remove recovery id
 	sig := signature[:len(signature)-1]
 	return crypto.VerifySignature(pk, hash[:], sig), nil
@@ -35,6 +34,11 @@ func Verify(pk, data, signature []byte) (bool, error) {
 // Note: The returned public key should not be used to verify `data` is valid
 // since a public key may have N private key pairs
 func Ecrecover(data, signature []byte) ([]byte, error) {
-	hash := blake2b.Sum256(data)
+	hash := Sum256(data)
 	return crypto.Ecrecover(hash[:], signature)
+}
+
+// Sum256 abstracts the hashing algorithm so it's in one place.
+func Sum256(data []byte) [32]byte {
+	return blake2b.Sum256(data)
 }

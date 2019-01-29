@@ -12,7 +12,6 @@ import (
 	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
 	"gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
 	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmcTzQXRcU2vf8yX5EEboz1BSvWC7wWmeYAKVQmhp8WZYU/sha256-simd"
 	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
 
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
@@ -21,6 +20,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
+	"github.com/filecoin-project/go-filecoin/wallet/util"
 )
 
 var (
@@ -310,7 +310,7 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts TipSet,
 
 // IsValidTicket checks that the signature over the proof is valid.
 func IsValidTicket(proof proofs.PoStProof, signerAddress address.Address, ticket types.Signature) bool {
-	proofHash := sha256.Sum256(proof[:])
+	proofHash := walletutil.Sum256(proof[:])
 	return types.IsValidSignature(proofHash[:], signerAddress, ticket)
 }
 
@@ -358,7 +358,7 @@ func CreateChallengeSeed(parents TipSet, nullBlkCount uint64) (proofs.PoStChalle
 	n := binary.PutUvarint(buf, nullBlkCount)
 	buf = append(smallest, buf[:n]...)
 
-	h := sha256.Sum256(buf)
+	h := walletutil.Sum256(buf)
 	return h, nil
 }
 

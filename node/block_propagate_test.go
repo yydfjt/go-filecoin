@@ -68,6 +68,10 @@ func TestBlockPropsManyNodes(t *testing.T) {
 	// minerOwnerAddr? because
 	minerOwnerAddr, err := minerNode.MiningOwnerAddress(ctx, minerAddr)
 	require.NoError(t, err)
+
+	ticket := mining.CreateTicket(proof, minerOwnerAddr, minerNode.Wallet)
+	require.True(t, types.IsValidSignature(proof[:], minerAddr, ticket))
+
 	nextBlk := &types.Block{
 		Miner:        minerAddr,
 		Parents:      baseTS.ToSortedCidSet(),
@@ -75,7 +79,7 @@ func TestBlockPropsManyNodes(t *testing.T) {
 		ParentWeight: types.Uint64(10000),
 		StateRoot:    baseTS.ToSlice()[0].StateRoot,
 		Proof:        proof,
-		Ticket:       mining.CreateTicket(proof, minerOwnerAddr, minerNode.Wallet),
+		Ticket:       ticket,
 	}
 
 	// Wait for network connection notifications to propagate

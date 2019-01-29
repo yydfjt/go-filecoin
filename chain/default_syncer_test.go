@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
@@ -16,6 +17,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/testhelpers"
 	"github.com/filecoin-project/go-filecoin/types"
+	"github.com/filecoin-project/go-filecoin/wallet/util"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -819,19 +821,28 @@ func TestTipSetWeightDeep(t *testing.T) {
 	// Bootstrap the storage market using a syncer with consensus using a
 	// TestView.
 	// pwr1, pwr2 = 1/100. pwr3 = 98/100.
-	pwr1, pwr2, pwr3 := uint64(10), uint64(10), uint64(980)
+	pwr0, pwr1, pwr2, pwr3 := uint64(1), uint64(10), uint64(10), uint64(980)
 
-	addr0, block, nonce, err := CreateMinerWithPower(ctx, t, syncer, calcGenBlk, mockSigner, 0, testAddress, uint64(0), cst, bs, calcGenBlkCid)
+	// This was passing miner power = 0, but that fails now because we require a valid signature.
+	addr0, block, nms, nonce, err := CreateMinerWithPower(ctx, t, syncer, calcGenBlk, mockSigner, 0, testAddress, pwr0, cst, bs, calcGenBlkCid)
 	require.NoError(err)
+	mockSigner.Addresses = append(mockSigner.Addresses, addr0)
+	mockSigner.AddrKeyInfo[addr0] = nms.AddrKeyInfo[addr0]
 
-	addr1, block, nonce, err := CreateMinerWithPower(ctx, t, syncer, block, mockSigner, nonce, addr0, pwr1, cst, bs, calcGenBlkCid)
+	addr1, block, nms, nonce, err := CreateMinerWithPower(ctx, t, syncer, block, mockSigner, nonce, addr0, pwr1, cst, bs, calcGenBlkCid)
 	require.NoError(err)
+	mockSigner.Addresses = append(mockSigner.Addresses, addr1)
+	mockSigner.AddrKeyInfo[addr1] = nms.AddrKeyInfo[addr1]
 
-	addr2, block, nonce, err := CreateMinerWithPower(ctx, t, syncer, block, mockSigner, nonce, addr0, pwr2, cst, bs, calcGenBlkCid)
+	addr2, block, nms, nonce, err := CreateMinerWithPower(ctx, t, syncer, block, mockSigner, nonce, addr0, pwr2, cst, bs, calcGenBlkCid)
 	require.NoError(err)
+	mockSigner.Addresses = append(mockSigner.Addresses, addr2)
+	mockSigner.AddrKeyInfo[addr2] = nms.AddrKeyInfo[addr2]
 
-	addr3, _, _, err := CreateMinerWithPower(ctx, t, syncer, block, mockSigner, nonce, addr0, pwr3, cst, bs, calcGenBlkCid)
+	addr3, _, nms, _, err := CreateMinerWithPower(ctx, t, syncer, block, mockSigner, nonce, addr0, pwr3, cst, bs, calcGenBlkCid)
 	require.NoError(err)
+	mockSigner.Addresses = append(mockSigner.Addresses, addr3)
+	mockSigner.AddrKeyInfo[addr3] = nms.AddrKeyInfo[addr3]
 
 	// Now sync the chain with consensus using a MarketView.
 	verifier = proofs.NewFakeVerifier(true, nil)
@@ -892,6 +903,7 @@ func TestTipSetWeightDeep(t *testing.T) {
 	measuredWeight, err := wFun(chain.Head())
 	require.NoError(err)
 	expectedWeight := startingWeight + uint64(22000)
+	fmt.Printf("\n\nweights: expectedWeight - measuredWeight: %d\n\n", expectedWeight-measuredWeight)
 	assert.Equal(expectedWeight, measuredWeight)
 
 	// fork 1 is heavier than the old head.
@@ -915,6 +927,8 @@ func TestTipSetWeightDeep(t *testing.T) {
 	measuredWeight, err = wFun(chain.Head())
 	require.NoError(err)
 	expectedWeight = startingWeight + uint64(33000)
+	// FIXME:  I don't know what weights this is supposed to have or why they changed
+	fmt.Printf("\n\nweights: expectedWeight - measuredWeight: %d\n\n", expectedWeight-measuredWeight)
 	assert.Equal(expectedWeight, measuredWeight)
 
 	// fork 2 has heavier weight because of addr3's power even though there
@@ -922,6 +936,7 @@ func TestTipSetWeightDeep(t *testing.T) {
 	f2b2 := RequireMkFakeChildCore(require,
 		FakeChildParams{Parent: testhelpers.RequireNewTipSet(require, f2b1), GenesisCid: calcGenBlkCid, StateRoot: bootstrapStateRoot, MinerAddr: addr3},
 		wFun)
+	f2b2.Proof, f2b2.Ticket, err = MakeProofAndWinningTicket(addr3, pwr3, 1000, mockSigner)
 
 	f2 := testhelpers.RequireNewTipSet(require, f2b2)
 	f2Cids := requirePutBlocks(require, cst, f2.ToSlice()...)
@@ -931,5 +946,30 @@ func TestTipSetWeightDeep(t *testing.T) {
 	measuredWeight, err = wFun(chain.Head())
 	require.NoError(err)
 	expectedWeight = startingWeight + uint64(119000)
+	fmt.Printf("\nweights: expectedWeight - measuredWeight: %d\n", expectedWeight-measuredWeight)
 	assert.Equal(expectedWeight, measuredWeight)
+}
+
+func TestSignatureRoundTrip(t *testing.T) {
+	assert := assert.New(t)
+
+	ki := types.MustGenerateKeyInfo(4, types.GenerateKeyInfoSeed())
+	mockSigner := types.NewMockSigner(ki)
+	testAddress := mockSigner.Addresses[0]
+
+	data := testhelpers.MakeRandomPoSTProofForTest()
+
+	hashedData := walletutil.Sum256(data[:])
+
+	//publicKey, err := ki[0].PublicKey()
+	//assert.NoError(err)
+
+	signature, err := mockSigner.SignBytes(hashedData[:], testAddress)
+	assert.NoError(err)
+	assert.True(types.IsValidSignature(hashedData[:], testAddress, signature))
+
+	//addrHash := address.Hash(testAddress[:])
+	//recoveredAddress := address.NewMainnet(addrHash)
+	//assert.Equal(recoveredAddress, testAddress)
+	//assert.Equal(publicKey, addrHash)
 }

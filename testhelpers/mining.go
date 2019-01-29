@@ -16,8 +16,9 @@ import (
 const BlockTimeTest = time.Second
 
 // CreateMinerMessage creates a message to create a miner.
-func CreateMinerMessage(from address.Address, nonce uint64, pledge uint64, pid peer.ID, collateral *types.AttoFIL) (*types.Message, error) {
-	params, err := abi.ToEncodedValues(big.NewInt(int64(pledge)), []byte{}, pid)
+func CreateMinerMessage(from address.Address, nonce uint64, pledge uint64, pubKey []byte, pid peer.ID, collateral *types.AttoFIL) (*types.Message, error) {
+
+	params, err := abi.ToEncodedValues(big.NewInt(int64(pledge)), pubKey, pid)
 	if err != nil {
 		return nil, err
 	}

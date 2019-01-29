@@ -24,16 +24,15 @@ import (
 	"reflect"
 	"testing"
 
-	"gx/ipfs/QmZp3eKdYQHHAneECmeK6HhiMwTPufmjC8DuuaGKv3unvx/blake2b-simd"
-
 	"github.com/stretchr/testify/assert"
 
 	cu "github.com/filecoin-project/go-filecoin/crypto/util"
+	"github.com/filecoin-project/go-filecoin/wallet/util"
 )
 
 var (
-	testSignMsgHash   = blake2b.Sum256([]byte("I am a message that has been signed"))
-	testUnsignMsgHash = blake2b.Sum256([]byte("I am a message that has NOT been signed"))
+	testSignMsgHash   = walletutil.Sum256([]byte("I am a message that has been signed"))
+	testUnsignMsgHash = walletutil.Sum256([]byte("I am a message that has NOT been signed"))
 )
 
 func TestEcrecover(t *testing.T) {

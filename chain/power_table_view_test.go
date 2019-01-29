@@ -93,11 +93,15 @@ func requireMinerWithPower(ctx context.Context, t *testing.T, power uint64) (bst
 	calcGenBlkCid := calcGenBlk.Cid()
 	// END Lifted from default_syncer_test.go
 
-	addr0, block, nonce, err := CreateMinerWithPower(ctx, t, syncer, calcGenBlk, mockSigner, 0, mockSigner.Addresses[0], uint64(0), cst, bs, calcGenBlkCid)
+	addr0, block, nms, nonce, err := CreateMinerWithPower(ctx, t, syncer, calcGenBlk, mockSigner, 0, mockSigner.Addresses[0], uint64(0), cst, bs, calcGenBlkCid)
 	require.NoError(err)
+	mockSigner.Addresses = append(mockSigner.Addresses, addr0)
+	mockSigner.AddrKeyInfo[addr0] = nms.AddrKeyInfo[addr0]
 
-	addrMine, _, _, err := CreateMinerWithPower(ctx, t, syncer, block, mockSigner, nonce, addr0, power, cst, bs, calcGenBlkCid)
+	addrMine, _, nms, _, err := CreateMinerWithPower(ctx, t, syncer, block, mockSigner, nonce, addr0, power, cst, bs, calcGenBlkCid)
 	require.NoError(err)
+	mockSigner.Addresses = append(mockSigner.Addresses, addrMine)
+	mockSigner.AddrKeyInfo[addrMine] = nms.AddrKeyInfo[addrMine]
 
 	st, err := chain.LatestState(ctx)
 	require.NoError(err)
