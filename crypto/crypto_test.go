@@ -22,9 +22,10 @@ import (
 	"crypto/ecdsa"
 	"testing"
 
+	"gx/ipfs/QmZp3eKdYQHHAneECmeK6HhiMwTPufmjC8DuuaGKv3unvx/blake2b-simd"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/filecoin-project/go-filecoin/wallet/util"
 )
 
 func TestToECDSAErrors(t *testing.T) {
@@ -50,7 +51,7 @@ func TestSign(t *testing.T) {
 	expPub := ECDSAPubToBytes(ecdasKey)
 
 	// Sign a message using the key we generated previously
-	msg := walletutil.Sum256([]byte("have you considered not asking passive aggressive questions?"))
+	msg := blake2b.Sum256([]byte("have you considered not asking passive aggressive questions?"))
 	sig, err := Sign(msg[:], key)
 	assert.NoError(err)
 
@@ -67,7 +68,7 @@ func TestSign(t *testing.T) {
 	assert.Equal(expPub, recPub2)
 
 	// Basic sanity check, don't sign the message, pub keys should be different
-	evilMsg := walletutil.Sum256([]byte("being the detective in a crime movie where you are also the murderer..debugging"))
+	evilMsg := blake2b.Sum256([]byte("being the detective in a crime movie where you are also the murderer..debugging"))
 	recPub, err = Ecrecover(evilMsg[:], sig)
 	assert.NoError(err)
 	assert.NotEqual(expPub, recPub)
