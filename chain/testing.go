@@ -184,30 +184,23 @@ func CreateMinerWithPower(ctx context.Context,
 	var bigIntPledge big.Int
 	bigIntPledge.SetUint64(pledge)
 
-	// set up public/private key pair for the new miner
-	ki := types.MustGenerateKeyInfo(1, types.GenerateKeyInfoSeed())
-	ms := types.NewMockSigner(ki)
-	minerAddr := ms.Addresses[0]
-	minerKeyInfo := ms.AddrKeyInfo[minerAddr]
-	pubKey, err := minerKeyInfo.PublicKey()
-	require.NoError(err)
-
-	// generate message for creating a miner
-	msg, err := th.CreateMinerMessage(sn.Addresses[0], nonce, pledge, pubKey, RequireRandomPeerID(), storagemarket.MinimumCollateral(&bigIntPledge))
+	// create miner
+	msg, err := th.CreateMinerMessage(sn.Addresses[0], nonce, pledge, []byte{}, RequireRandomPeerID(),
+		storagemarket.MinimumCollateral(&bigIntPledge))
 	require.NoError(err)
 
 	ptv := th.NewTestPowerTableView(power, 1000)
 
-	// simulate the rewardAddress actor mining a block with this message in it
-	b := RequireMineOnce(ctx, t, syncer, cst, bs,
-		lastBlock, rewardAddress, []*types.SignedMessage{mockSign(sn, msg)},
-		ptv, genCid, sn)
+	b := RequireMineOnce(ctx, t, syncer, cst, bs, lastBlock, rewardAddress, []*types.SignedMessage{mockSign(sn,
+		msg)}, ptv, genCid, sn)
 	nonce++
 
 	require.Equal(uint8(0), b.MessageReceipts[0].ExitCode)
+	minerAddr, err := address.NewFromBytes(b.MessageReceipts[0].Return[0])
+	require.NoError(err)
 
 	if power == uint64(0) {
-		return minerAddr, b, &ms, nonce, nil
+		return minerAddr, b, &sn, nonce, nil
 	}
 
 	// TODO: We should obtain the SectorID from the SectorBuilder instead of
@@ -229,7 +222,7 @@ func CreateMinerWithPower(ctx context.Context,
 		require.Equal(uint8(0), r.ExitCode)
 	}
 
-	return minerAddr, b, &ms, nonce, nil
+	return minerAddr, b, &sn, nonce, nil
 }
 
 // RequireMineOnce process one block and panic on error.
@@ -300,7 +293,8 @@ func RequireMineOnce(ctx context.Context,
 	return b
 }
 
-// MakeProofAndWinningTicket generates a proof and ticket that will pass validateMining as above, except you provide the signer.
+// MakeProofAndWinningTicket generates a proof and ticket that will pass validateMining as above,
+// except you provide the signer.
 func MakeProofAndWinningTicket(minerAddr address.Address, minerPower uint64, totalPower uint64, signer types.Signer) (proofs.PoStProof, types.Signature, error) {
 	var ticket types.Signature
 	var postProof proofs.PoStProof
@@ -316,7 +310,6 @@ func MakeProofAndWinningTicket(minerAddr address.Address, minerPower uint64, tot
 			return postProof, ticket, nil
 		}
 	}
-
 }
 
 // These peer.ID generators were copied from libp2p/go-testutil. We didn't bring in the

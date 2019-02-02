@@ -6,8 +6,9 @@ package mining
 
 import (
 	"context"
-	"fmt"
 	"time"
+
+	"golang.org/x/crypto/blake2b"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/consensus"
@@ -16,7 +17,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
-	"github.com/filecoin-project/go-filecoin/wallet/util"
+	// "github.com/filecoin-project/go-filecoin/wallet/util"
 
 	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
 	"gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
@@ -90,7 +91,8 @@ func NewDefaultWorker(messagePool *core.MessagePool,
 	powerTable consensus.PowerTableView,
 	bs blockstore.Blockstore,
 	cst *hamt.CborIpldStore,
-	miner address.Address,
+	miner address.Address, // rename minerActor
+	// add signerAddr
 	signer types.Signer,
 	bt time.Duration) *DefaultWorker {
 	w := NewDefaultWorkerWithDeps(messagePool,
@@ -101,6 +103,7 @@ func NewDefaultWorker(messagePool *core.MessagePool,
 		bs,
 		cst,
 		miner,
+		// add signingAddr
 		signer,
 		bt,
 		func() {})
@@ -118,7 +121,8 @@ func NewDefaultWorkerWithDeps(
 	powerTable consensus.PowerTableView,
 	bs blockstore.Blockstore,
 	cst *hamt.CborIpldStore,
-	miner address.Address,
+	miner address.Address, // rename minerActor
+	// add signingAddr
 	signer types.Signer,
 	bt time.Duration,
 	createPoSTFunc DoSomeWorkFunc) *DefaultWorker {
@@ -133,7 +137,8 @@ func NewDefaultWorkerWithDeps(
 		createPoSTFunc: createPoSTFunc,
 		minerAddr:      miner,
 		signer:         signer,
-		blockTime:      bt,
+		// add signingAddr
+		blockTime: bt,
 	}
 }
 
@@ -186,10 +191,12 @@ func (w *DefaultWorker) Mine(ctx context.Context, base consensus.TipSet, nullBlk
 			return false
 		}
 		copy(proof[:], prChRead[:])
+		// change w.minerAddr to w.signingAddr
 		ticket = CreateTicket(proof, w.minerAddr, w.signer)
 	}
 
 	// TODO: Test the interplay of isWinningTicket() and createPoSTFunc()
+	// change this to w.signingAddr
 	weHaveAWinner, err := consensus.IsWinningTicket(ctx, w.blockstore, w.powerTable, st, ticket, w.minerAddr)
 
 	if err != nil {
@@ -226,14 +233,18 @@ func createProof(challengeSeed proofs.PoStChallengeSeed, createPoST DoSomeWorkFu
 // []byte and the minerAddress address.Address.
 //    returns:  []byte -- the ticket.
 func CreateTicket(proof proofs.PoStProof, minerAddr address.Address, signer types.Signer) []byte {
-	h := walletutil.Sum256(proof[:])
+	buf := append(proof[:], minerAddr.Bytes()...)
+	h := blake2b.Sum256(buf)
+	return h[:]
 
-	ticket, err := signer.SignBytes(h[:], minerAddr)
-	if err != nil {
-		errMsg := fmt.Sprintf("SignBytes error in CreateTicket: %s", err.Error())
-		panic(errMsg)
-	}
-	return ticket
+	// h := walletutil.Sum256(proof[:])
+	//
+	// ticket, err := signer.SignBytes(h[:], minerAddr)
+	// if err != nil {
+	// 	errMsg := fmt.Sprintf("SignBytes error in CreateTicket: %s", err.Error())
+	// 	panic(errMsg)
+	// }
+	// return ticket
 }
 
 // fakeCreatePoST is the default implementation of DoSomeWorkFunc.

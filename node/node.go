@@ -742,6 +742,7 @@ func (node *Node) StartMining(ctx context.Context) error {
 	}
 
 	minerOwnerAddr, err := node.MiningOwnerAddress(ctx, minerAddr)
+	// minerSigningAddress, err = node.MinerSigningAddress(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "failed to get mining owner address for miner %s", minerAddr)
 	}
@@ -776,6 +777,7 @@ func (node *Node) StartMining(ctx context.Context) error {
 		}
 
 		processor := consensus.NewDefaultProcessor()
+		// add signingAddr to params
 		worker := mining.NewDefaultWorker(node.MsgPool, getState, getWeight, processor, node.PowerTable, node.Blockstore, node.CborStore(), minerAddr, node.Wallet, blockTime)
 		node.MiningScheduler = mining.NewScheduler(worker, mineDelay, node.ChainReader.Head)
 	}
@@ -958,52 +960,50 @@ func (node *Node) CreateMiner(ctx context.Context, accountAddr address.Address, 
 		log.FinishWithErr(ctx, err)
 	}()
 
-	// TODO: make this more streamlined in the wallet
-
-	// Generate a new public/private key pair for the miner actor.
-	minerAddr, err := node.NewAddress()
+	// this is now in the node wallet
+	minerActorKeyInfo, err := node.GenerateNewKeyInfo()
+	pubKey, err := minerActorKeyInfo.PublicKey()
 	if err != nil {
 		return nil, err
 	}
 
-	backend, err := node.Wallet.Find(minerAddr)
-	info, err := backend.GetKeyInfo(minerAddr)
-	if err != nil {
-		return nil, err
-	}
-	pubkey, err := info.PublicKey()
+	smsgCid, err := node.PlumbingAPI.MessageSend(ctx, accountAddr, address.StorageMarketAddress, collateral, gasPrice, gasLimit, "createMiner", big.NewInt(int64(pledge)), pubKey, pid)
 	if err != nil {
 		return nil, err
 	}
 
-	smsgCid, err := node.PlumbingAPI.MessageSend(ctx, accountAddr, address.StorageMarketAddress, collateral, gasPrice, gasLimit, "createMiner", big.NewInt(int64(pledge)), pubkey, pid)
-	if err != nil {
-		return nil, err
-	}
-
+	var minerAddress address.Address
 	err = node.PlumbingAPI.MessageWait(ctx, smsgCid, func(blk *types.Block, smsg *types.SignedMessage,
 		receipt *types.MessageReceipt) error {
 		if receipt.ExitCode != uint8(0) {
 			return vmErrors.VMExitCodeToError(receipt.ExitCode, storagemarket.Errors)
 		}
-		_, err = address.NewFromBytes(receipt.Return[0])
+		minerAddress, err = address.NewFromBytes(receipt.Return[0])
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	err = node.saveMinerAddressToConfig(minerAddr)
+	err = node.saveMinerAddressToConfig(minerAddress)
 	if err != nil {
-		return &minerAddr, err
+		return &minerAddress, err
 	}
 
 	err = node.setupMining(ctx)
 
-	return &minerAddr, err
+	return &minerAddress, err
 }
 
 func (node *Node) saveMinerAddressToConfig(addr address.Address) error {
+	r := node.Repo
+	newConfig := r.Config()
+	newConfig.Mining.MinerAddress = addr
+
+	return r.ReplaceConfig(newConfig)
+}
+
+func (node *Node) saveMinerSigningAddressToConfig(addr address.Address) error {
 	r := node.Repo
 	newConfig := r.Config()
 	newConfig.Mining.MinerAddress = addr
@@ -1022,6 +1022,11 @@ func (node *Node) MiningOwnerAddress(ctx context.Context, miningAddr address.Add
 	return address.NewFromBytes(res[0])
 }
 
+func (node *Node) MinerSigningAddress(ctx context.Context) (address.Address, error) {
+	// r := node.Repo
+	return address.Address{}, nil
+}
+
 // BlockHeight returns the current block height of the chain.
 func (node *Node) BlockHeight() (*types.BlockHeight, error) {
 	head := node.ChainReader.Head()
@@ -1033,6 +1038,27 @@ func (node *Node) BlockHeight() (*types.BlockHeight, error) {
 		return nil, err
 	}
 	return types.NewBlockHeight(height), nil
+}
+
+// GenerateNewAddressAndPubKey creates a new address & keypair for a node
+// 		returns: the new address, its public key, and/or any errors.
+func (node *Node) GenerateNewKeyInfo() (*types.KeyInfo, error) {
+	// TODO: make this more streamlined in the wallet
+	newAddr, err := node.NewAddress()
+	if err != nil {
+		return &types.KeyInfo{}, err
+	}
+
+	backend, err := node.Wallet.Find(newAddr)
+	if err != nil {
+		return &types.KeyInfo{}, err
+	}
+
+	info, err := backend.GetKeyInfo(newAddr)
+	if err != nil {
+		return &types.KeyInfo{}, err
+	}
+	return info, nil
 }
 
 func (node *Node) handleSubscription(ctx context.Context, f pubSubProcessorFunc, fname string, s *pubsub.Subscription, sname string) {

@@ -260,7 +260,6 @@ func (c *Expected) RunStateTransition(ctx context.Context, ts TipSet, parentTs T
 //    Returns an error if:
 //    	* any tipset's block was mined by an invalid miner address.
 //      * the block proof is invalid for the challenge
-//      * the block ticket is incorrectly computed
 //      * the block ticket fails the power check, i.e. is not a winning ticket
 //    Returns nil if all the above checks pass.
 // See https://github.com/filecoin-project/specs/blob/master/mining.md#chain-validation
@@ -281,19 +280,15 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts TipSet,
 			return errors.Wrap(err, "couldn't create challengeSeed")
 		}
 
-		isValid, err := proofs.IsPoStValidWithVerifier(c.verifier, []proofs.CommR{}, challengeSeed, []uint64{}, blk.Proof)
+		isPoStValid, err := proofs.IsPoStValidWithVerifier(c.verifier, []proofs.CommR{}, challengeSeed, []uint64{}, blk.Proof)
 		if err != nil {
 			return errors.Wrap(err, "could not test the proof's validity")
 		}
-		if !isValid {
+		if !isPoStValid {
 			return errors.New("invalid proof")
 		}
 
-		if !IsValidTicket(blk.Proof, blk.Miner, blk.Ticket) {
-			return errors.New("ticket is not a valid signature")
-		}
-
-		// TODO: Also need to validate BlockSig
+		// TODO: validate Block signature and ticket signature
 
 		// See https://github.com/filecoin-project/specs/blob/master/mining.md#ticket-checking
 		result, err := IsWinningTicket(ctx, c.bstore, c.PwrTableView, st, blk.Ticket, blk.Miner)
@@ -308,17 +303,11 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts TipSet,
 	return nil
 }
 
-// IsValidTicket checks that the signature over the proof is valid.
-func IsValidTicket(proof proofs.PoStProof, signerAddress address.Address, ticket types.Signature) bool {
-	proofHash := walletutil.Sum256(proof[:])
-	return types.IsValidSignature(proofHash[:], signerAddress, ticket)
-}
-
 // IsWinningTicket fetches miner power & total power, returns true if it's a winning ticket, false if not,
 //    errors out if minerPower or totalPower can't be found.
 //    See https://github.com/filecoin-project/aq/issues/70 for an explanation of the math here.
 func IsWinningTicket(ctx context.Context, bs blockstore.Blockstore, ptv PowerTableView, st state.Tree,
-	ticket types.Signature, miner address.Address) (bool, error) {
+	ticket types.Signature, miner address.Address) (bool, error) { // rename miner to signer
 
 	totalPower, err := ptv.Total(ctx, st, bs)
 	if err != nil {
