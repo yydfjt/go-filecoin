@@ -16,21 +16,16 @@ import (
 	"gx/ipfs/QmYZwey1thDTynSrvd6qQkX24UpTka6TFhQ2v569UpoqxD/go-ipfs-exchange-offline"
 	ds "gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/chain"
 	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/gengen/util"
-	"github.com/filecoin-project/go-filecoin/lookup"
-	"github.com/filecoin-project/go-filecoin/mining"
-	"github.com/filecoin-project/go-filecoin/plumbing"
-	"github.com/filecoin-project/go-filecoin/plumbing/cfg"
-	"github.com/filecoin-project/go-filecoin/plumbing/msg"
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/repo"
 	"github.com/filecoin-project/go-filecoin/testhelpers"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/wallet"
-	"github.com/stretchr/testify/require"
 )
 
 // ChainSeed is a generalized struct for configuring node
@@ -230,72 +225,6 @@ type MustCreateMinerResult struct {
 func configureFakeVerifier(cfo []ConfigOpt) []ConfigOpt {
 	verifier := proofs.NewFakeVerifier(true, nil)
 	return append(cfo, VerifierConfigOption(verifier))
-}
-
-// resetNodeGen resets the genesis block of the input given node using the gif
-// function provided.
-// Note: this is an awful way to test the node. This function duplicates to a large
-// degree what the constructor does. It should not be in the business of replacing
-// fields on node as doing that correctly requires knowing exactly how the node is
-// created, which is bad information to need to rely on in tests.
-func resetNodeGen(node *Node, gif consensus.GenesisInitFunc) error { // nolint: deadcode
-	ctx := context.Background()
-	newGenBlk, err := gif(node.CborStore(), node.Blockstore)
-	if err != nil {
-		return err
-	}
-	newGenTS, err := consensus.NewTipSet(newGenBlk)
-	if err != nil {
-		return errors.Wrap(err, "failed to generate genesis block")
-	}
-	// Persist the genesis tipset to the repo.
-	genTsas := &chain.TipSetAndState{
-		TipSet:          newGenTS,
-		TipSetStateRoot: newGenBlk.StateRoot,
-	}
-
-	var newChainStore chain.Store = chain.NewDefaultStore(node.Repo.ChainDatastore(), node.CborStore(), newGenBlk.Cid())
-
-	if err = newChainStore.PutTipSetAndState(ctx, genTsas); err != nil {
-		return errors.Wrap(err, "failed to put genesis block in chain store")
-	}
-	if err = newChainStore.SetHead(ctx, newGenTS); err != nil {
-		return errors.Wrap(err, "failed to persist genesis block in chain store")
-	}
-	// Persist the genesis cid to the repo.
-	val, err := json.Marshal(newGenBlk.Cid())
-	if err != nil {
-		return errors.Wrap(err, "failed to marshal genesis cid")
-	}
-	if err = node.Repo.Datastore().Put(chain.GenesisKey, val); err != nil {
-		return errors.Wrap(err, "failed to persist genesis cid")
-	}
-	newChainReader, ok := newChainStore.(chain.ReadStore)
-	if !ok {
-		return errors.New("failed to cast chain.Store to chain.ReadStore")
-	}
-	newCon := consensus.NewExpected(node.CborStore(),
-		node.Blockstore,
-		consensus.NewDefaultProcessor(),
-		node.PowerTable,
-		newGenBlk.Cid(),
-		proofs.NewFakeVerifier(true, nil))
-	newSyncer := chain.NewDefaultSyncer(node.OnlineStore, node.CborStore(), newCon, newChainStore)
-	node.ChainReader = newChainReader
-	node.Consensus = newCon
-	node.Syncer = newSyncer
-	newSigGetter := mthdsig.NewGetter(newChainReader)
-	newMsgQueryer := msg.NewQueryer(node.Repo, node.Wallet, node.ChainReader, node.CborStore(), node.Blockstore)
-	newMsgWaiter := msg.NewWaiter(newChainReader, node.Blockstore, node.CborStore())
-	newMsgSender := msg.NewSender(node.Repo, node.Wallet, node.ChainReader, node.MsgPool, node.PubSub.Publish)
-	config := cfg.NewConfig(node.Repo)
-	node.PlumbingAPI = plumbing.New(newSigGetter, newMsgQueryer, newMsgSender, newMsgWaiter, config)
-
-	defaultSenderGetter := func() (address.Address, error) {
-		return msg.GetAndMaybeSetDefaultSenderAddress(node.Repo, node.Wallet)
-	}
-	node.lookup = lookup.NewChainLookupService(newChainReader, defaultSenderGetter, node.Blockstore)
-	return nil
 }
 
 // PeerKeys are a list of keys for peers that can be used in testing.
