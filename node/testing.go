@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"sync"
 	"testing"
 
 	"gx/ipfs/QmNiJiXwWE3kRhZrC5ej3kSjWHm337pYfhjLGSCDNKJP2s/go-libp2p-crypto"
@@ -17,16 +16,17 @@ import (
 	"gx/ipfs/QmYZwey1thDTynSrvd6qQkX24UpTka6TFhQ2v569UpoqxD/go-ipfs-exchange-offline"
 	ds "gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
 
-	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/chain"
 	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/gengen/util"
+	"github.com/filecoin-project/go-filecoin/lookup"
 	"github.com/filecoin-project/go-filecoin/mining"
+	"github.com/filecoin-project/go-filecoin/plumbing"
+	"github.com/filecoin-project/go-filecoin/plumbing/cfg"
 	"github.com/filecoin-project/go-filecoin/plumbing/msg"
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/repo"
-	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/testhelpers"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/wallet"
@@ -232,74 +232,70 @@ func configureFakeVerifier(cfo []ConfigOpt) []ConfigOpt {
 	return append(cfo, VerifierConfigOption(verifier))
 }
 
-// RunCreateMiner runs create miner and then runs a given assertion with the result.
-func RunCreateMiner(t *testing.T, node *Node, from address.Address, pledge uint64, pid peer.ID, collateral types.AttoFIL) chan MustCreateMinerResult {
-	resultChan := make(chan MustCreateMinerResult)
-	require := require.New(t)
-
-	if !node.ChainReader.GenesisCid().Defined() {
-		panic("must initialize with genesis block first")
-	}
-
+// resetNodeGen resets the genesis block of the input given node using the gif
+// function provided.
+// Note: this is an awful way to test the node. This function duplicates to a large
+// degree what the constructor does. It should not be in the business of replacing
+// fields on node as doing that correctly requires knowing exactly how the node is
+// created, which is bad information to need to rely on in tests.
+func resetNodeGen(node *Node, gif consensus.GenesisInitFunc) error { // nolint: deadcode
 	ctx := context.Background()
-
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-
-	subscription, err := node.PubSub.Subscribe(msg.Topic)
-	require.NoError(err)
-
-	go func() {
-		minerAddr, err := node.CreateMiner(ctx, from, types.NewGasPrice(0), types.NewGasUnits(0), pledge, pid, &collateral)
-		resultChan <- MustCreateMinerResult{MinerAddress: minerAddr, Err: err}
-		wg.Done()
-	}()
-
-	// wait for create miner call to put a message in the pool
-	_, err = subscription.Next(ctx)
-	require.NoError(err)
-	getStateFromKey := func(ctx context.Context, tsKey string) (state.Tree, error) {
-		tsas, err := node.ChainReader.GetTipSetAndState(ctx, tsKey)
-		if err != nil {
-			return nil, err
-		}
-		return state.LoadStateTree(ctx, node.CborStore(), tsas.TipSetStateRoot, builtin.Actors)
+	newGenBlk, err := gif(node.CborStore(), node.Blockstore)
+	if err != nil {
+		return err
 	}
-	getStateTree := func(ctx context.Context, ts consensus.TipSet) (state.Tree, error) {
-		return getStateFromKey(ctx, ts.String())
+	newGenTS, err := consensus.NewTipSet(newGenBlk)
+	if err != nil {
+		return errors.Wrap(err, "failed to generate genesis block")
 	}
-	getWeight := func(ctx context.Context, ts consensus.TipSet) (uint64, error) {
-		parent, err := ts.Parents()
-		if err != nil {
-			return uint64(0), err
-		}
-		// TODO handle genesis cid more gracefully
-		if parent.Len() == 0 {
-			return node.Consensus.Weight(ctx, ts, nil)
-		}
-		pSt, err := getStateFromKey(ctx, parent.String())
-		if err != nil {
-			return uint64(0), err
-		}
-		return node.Consensus.Weight(ctx, ts, pSt)
+	// Persist the genesis tipset to the repo.
+	genTsas := &chain.TipSetAndState{
+		TipSet:          newGenTS,
+		TipSetStateRoot: newGenBlk.StateRoot,
 	}
 
-	w := mining.NewDefaultWorker(node.MsgPool, getStateTree, getWeight, consensus.NewDefaultProcessor(), node.PowerTable, node.Blockstore, node.CborStore(), address.TestAddress, testhelpers.BlockTimeTest)
-	cur := node.ChainReader.Head()
-	out, err := mining.MineOnce(ctx, w, mining.MineDelayTest, cur)
-	require.NoError(err)
-	require.NoError(out.Err)
-	outTS := testhelpers.RequireNewTipSet(require, out.NewBlock)
-	chainStore, ok := node.ChainReader.(chain.Store)
-	require.True(ok)
-	tsas := &chain.TipSetAndState{
-		TipSet:          outTS,
-		TipSetStateRoot: out.NewBlock.StateRoot,
+	var newChainStore chain.Store = chain.NewDefaultStore(node.Repo.ChainDatastore(), node.CborStore(), newGenBlk.Cid())
+
+	if err = newChainStore.PutTipSetAndState(ctx, genTsas); err != nil {
+		return errors.Wrap(err, "failed to put genesis block in chain store")
 	}
-	require.NoError(chainStore.PutTipSetAndState(ctx, tsas))
-	require.NoError(chainStore.SetHead(ctx, outTS))
-	return resultChan
+	if err = newChainStore.SetHead(ctx, newGenTS); err != nil {
+		return errors.Wrap(err, "failed to persist genesis block in chain store")
+	}
+	// Persist the genesis cid to the repo.
+	val, err := json.Marshal(newGenBlk.Cid())
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal genesis cid")
+	}
+	if err = node.Repo.Datastore().Put(chain.GenesisKey, val); err != nil {
+		return errors.Wrap(err, "failed to persist genesis cid")
+	}
+	newChainReader, ok := newChainStore.(chain.ReadStore)
+	if !ok {
+		return errors.New("failed to cast chain.Store to chain.ReadStore")
+	}
+	newCon := consensus.NewExpected(node.CborStore(),
+		node.Blockstore,
+		consensus.NewDefaultProcessor(),
+		node.PowerTable,
+		newGenBlk.Cid(),
+		proofs.NewFakeVerifier(true, nil))
+	newSyncer := chain.NewDefaultSyncer(node.OnlineStore, node.CborStore(), newCon, newChainStore)
+	node.ChainReader = newChainReader
+	node.Consensus = newCon
+	node.Syncer = newSyncer
+	newSigGetter := mthdsig.NewGetter(newChainReader)
+	newMsgQueryer := msg.NewQueryer(node.Repo, node.Wallet, node.ChainReader, node.CborStore(), node.Blockstore)
+	newMsgWaiter := msg.NewWaiter(newChainReader, node.Blockstore, node.CborStore())
+	newMsgSender := msg.NewSender(node.Repo, node.Wallet, node.ChainReader, node.MsgPool, node.PubSub.Publish)
+	config := cfg.NewConfig(node.Repo)
+	node.PlumbingAPI = plumbing.New(newSigGetter, newMsgQueryer, newMsgSender, newMsgWaiter, config)
+
+	defaultSenderGetter := func() (address.Address, error) {
+		return msg.GetAndMaybeSetDefaultSenderAddress(node.Repo, node.Wallet)
+	}
+	node.lookup = lookup.NewChainLookupService(newChainReader, defaultSenderGetter, node.Blockstore)
+	return nil
 }
 
 // PeerKeys are a list of keys for peers that can be used in testing.

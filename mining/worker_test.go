@@ -1,20 +1,22 @@
-package mining
+package mining_test
 
 import (
 	"context"
 	"errors"
-	"github.com/filecoin-project/go-filecoin/proofs"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/actor"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/core"
+	"github.com/filecoin-project/go-filecoin/mining"
+	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/state"
 	th "github.com/filecoin-project/go-filecoin/testhelpers"
 	"github.com/filecoin-project/go-filecoin/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
 	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
@@ -25,24 +27,32 @@ import (
 func Test_Mine(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
+
+	var doSomeWorkCalled = false
+	CreatePoSTFunc := func() { doSomeWorkCalled = true }
+
+	mockSigner, blockSignerAddr := setupSigner()
+
 	newCid := types.NewCidForTestGetter()
 	stateRoot := newCid()
 	baseBlock := &types.Block{Height: 2, StateRoot: stateRoot}
 	tipSet := th.RequireNewTipSet(require, baseBlock)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	st, pool, addrs, cst, bs := sharedSetup(t)
+	st, pool, addrs, cst, bs := sharedSetup(t, mockSigner)
 	getStateTree := func(c context.Context, ts consensus.TipSet) (state.Tree, error) {
 		return st, nil
 	}
 
-	// Success case. TODO: this case isn't testing much.  Testing w.Mine
-	// further needs a lot more attention.
-	worker := NewDefaultWorker(pool, getStateTree, getWeightTest, th.NewTestProcessor(), NewTestPowerTableView(1), bs, cst, addrs[3], th.BlockTimeTest)
+	minerOwnerAddr := addrs[3]
 
-	outCh := make(chan Output)
-	doSomeWorkCalled := false
-	worker.createPoST = func() { doSomeWorkCalled = true }
+	// Success case.
+	// TODO: this case isn't testing much.  Testing w.Mine further needs a lot more attention.
+	worker := mining.NewDefaultWorkerWithDeps(pool, getStateTree, getWeightTest, th.NewTestProcessor(),
+		mining.NewTestPowerTableView(1), bs, cst, minerOwnerAddr, blockSignerAddr, mockSigner, th.BlockTimeTest,
+		CreatePoSTFunc)
+
+	outCh := make(chan mining.Output)
 	go worker.Mine(ctx, tipSet, 0, outCh)
 	r := <-outCh
 	assert.NoError(r.Err)
@@ -50,10 +60,10 @@ func Test_Mine(t *testing.T) {
 	cancel()
 	// Block generation fails.
 	ctx, cancel = context.WithCancel(context.Background())
-	worker = NewDefaultWorker(pool, makeExplodingGetStateTree(st), getWeightTest, th.NewTestProcessor(), NewTestPowerTableView(1), bs, cst, addrs[3], th.BlockTimeTest)
-	outCh = make(chan Output)
+	worker = mining.NewDefaultWorkerWithDeps(pool, makeExplodingGetStateTree(st), getWeightTest, th.NewTestProcessor(),
+		mining.NewTestPowerTableView(1), bs, cst, minerOwnerAddr, blockSignerAddr, mockSigner, th.BlockTimeTest, CreatePoSTFunc)
+	outCh = make(chan mining.Output)
 	doSomeWorkCalled = false
-	worker.createPoST = func() { doSomeWorkCalled = true }
 	go worker.Mine(ctx, tipSet, 0, outCh)
 	r = <-outCh
 	assert.Error(r.Err)
@@ -62,10 +72,10 @@ func Test_Mine(t *testing.T) {
 
 	// Sent empty tipset
 	ctx, cancel = context.WithCancel(context.Background())
-	worker = NewDefaultWorker(pool, getStateTree, getWeightTest, th.NewTestProcessor(), NewTestPowerTableView(1), bs, cst, addrs[3], th.BlockTimeTest)
-	outCh = make(chan Output)
+	worker = mining.NewDefaultWorkerWithDeps(pool, getStateTree, getWeightTest, th.NewTestProcessor(),
+		mining.NewTestPowerTableView(1), bs, cst, minerOwnerAddr, blockSignerAddr, mockSigner, th.BlockTimeTest, CreatePoSTFunc)
+	outCh = make(chan mining.Output)
 	doSomeWorkCalled = false
-	worker.createPoST = func() { doSomeWorkCalled = true }
 	input := consensus.TipSet{}
 	go worker.Mine(ctx, input, 0, outCh)
 	r = <-outCh
@@ -73,10 +83,6 @@ func Test_Mine(t *testing.T) {
 	assert.False(doSomeWorkCalled)
 	cancel()
 }
-
-var seed = types.GenerateKeyInfoSeed()
-var ki = types.MustGenerateKeyInfo(10, seed)
-var mockSigner = types.NewMockSigner(ki)
 
 func TestGenerate(t *testing.T) {
 	// TODO use core.FakeActor for state/contract tests for generate:
@@ -92,8 +98,11 @@ func sharedSetupInitial() (*hamt.CborIpldStore, *core.MessagePool, cid.Cid) {
 	return cst, pool, fakeActorCodeCid
 }
 
-func sharedSetup(t *testing.T) (state.Tree, *core.MessagePool, []address.Address, *hamt.CborIpldStore, blockstore.Blockstore) {
+func sharedSetup(t *testing.T, mockSigner types.MockSigner) (
+	state.Tree, *core.MessagePool, []address.Address, *hamt.CborIpldStore, blockstore.Blockstore) {
+
 	require := require.New(t)
+
 	cst, pool, fakeActorCodeCid := sharedSetupInitial()
 	vms := th.VMStorage()
 	d := datastore.NewMapDatastore()
@@ -126,6 +135,7 @@ func TestApplyMessagesForSuccessTempAndPermFailures(t *testing.T) {
 	require := require.New(t)
 	vms := th.VMStorage()
 
+	mockSigner, _ := setupSigner()
 	cst, _, fakeActorCodeCid := sharedSetupInitial()
 
 	// Stick two fake actors in the state tree so they can talk.
@@ -180,14 +190,19 @@ func TestApplyMessagesForSuccessTempAndPermFailures(t *testing.T) {
 func TestGenerateMultiBlockTipSet(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
-
 	ctx := context.Background()
+
+	CreatePoSTFunc := func() {}
+
+	mockSigner, blockSignerAddr := setupSigner()
 	newCid := types.NewCidForTestGetter()
-	st, pool, addrs, cst, bs := sharedSetup(t)
+	st, pool, addrs, cst, bs := sharedSetup(t, mockSigner)
 	getStateTree := func(c context.Context, ts consensus.TipSet) (state.Tree, error) {
 		return st, nil
 	}
-	worker := NewDefaultWorker(pool, getStateTree, getWeightTest, th.NewTestProcessor(), &th.TestView{}, bs, cst, addrs[3], th.BlockTimeTest)
+	minerOwnerAddr := addrs[3]
+	worker := mining.NewDefaultWorkerWithDeps(pool, getStateTree, getWeightTest, th.NewTestProcessor(),
+		&th.TestView{}, bs, cst, minerOwnerAddr, blockSignerAddr, mockSigner, th.BlockTimeTest, CreatePoSTFunc)
 
 	parents := types.NewSortedCidSet(newCid())
 	stateRoot := newCid()
@@ -216,15 +231,18 @@ func TestGenerateMultiBlockTipSet(t *testing.T) {
 func TestGeneratePoolBlockResults(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
+	CreatePoSTFunc := func() {}
 
 	ctx := context.Background()
+	mockSigner, blockSignerAddr := setupSigner()
 	newCid := types.NewCidForTestGetter()
-	st, pool, addrs, cst, bs := sharedSetup(t)
+	st, pool, addrs, cst, bs := sharedSetup(t, mockSigner)
 
 	getStateTree := func(c context.Context, ts consensus.TipSet) (state.Tree, error) {
 		return st, nil
 	}
-	worker := NewDefaultWorker(pool, getStateTree, getWeightTest, consensus.NewDefaultProcessor(), &th.TestView{}, bs, cst, addrs[3], th.BlockTimeTest)
+	worker := mining.NewDefaultWorkerWithDeps(pool, getStateTree, getWeightTest, consensus.NewDefaultProcessor(),
+		&th.TestView{}, bs, cst, addrs[3], blockSignerAddr, mockSigner, th.BlockTimeTest, CreatePoSTFunc)
 
 	// addr3 doesn't correspond to an extant account, so this will trigger errAccountNotFound -- a temporary failure.
 	msg1 := types.NewMessage(addrs[2], addrs[0], 0, nil, "", nil)
@@ -273,15 +291,20 @@ func TestGenerateSetsBasicFields(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 
+	CreatePoSTFunc := func() {}
+
 	ctx := context.Background()
+	mockSigner, blockSignerAddr := setupSigner()
 	newCid := types.NewCidForTestGetter()
 
-	st, pool, addrs, cst, bs := sharedSetup(t)
+	st, pool, addrs, cst, bs := sharedSetup(t, mockSigner)
 
 	getStateTree := func(c context.Context, ts consensus.TipSet) (state.Tree, error) {
 		return st, nil
 	}
-	worker := NewDefaultWorker(pool, getStateTree, getWeightTest, consensus.NewDefaultProcessor(), &th.TestView{}, bs, cst, addrs[3], th.BlockTimeTest)
+	minerOwnerAddr := addrs[3]
+	worker := mining.NewDefaultWorkerWithDeps(pool, getStateTree, getWeightTest, consensus.NewDefaultProcessor(),
+		&th.TestView{}, bs, cst, minerOwnerAddr, blockSignerAddr, mockSigner, th.BlockTimeTest, CreatePoSTFunc)
 
 	h := types.Uint64(100)
 	w := types.Uint64(1000)
@@ -296,28 +319,32 @@ func TestGenerateSetsBasicFields(t *testing.T) {
 	assert.NoError(err)
 
 	assert.Equal(h+1, blk.Height)
-	assert.Equal(addrs[3], blk.Miner)
+	assert.Equal(minerOwnerAddr, blk.Miner)
 
 	blk, err = worker.Generate(ctx, baseTipSet, nil, proofs.PoStProof{}, 1)
 	assert.NoError(err)
 
 	assert.Equal(h+2, blk.Height)
 	assert.Equal(w+10.0, blk.ParentWeight)
-	assert.Equal(addrs[3], blk.Miner)
+	assert.Equal(minerOwnerAddr, blk.Miner)
 }
 
 func TestGenerateWithoutMessages(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 
+	CreatePoSTFunc := func() {}
+
 	ctx := context.Background()
+	mockSigner, blockSignerAddr := setupSigner()
 	newCid := types.NewCidForTestGetter()
 
-	st, pool, addrs, cst, bs := sharedSetup(t)
+	st, pool, addrs, cst, bs := sharedSetup(t, mockSigner)
 	getStateTree := func(c context.Context, ts consensus.TipSet) (state.Tree, error) {
 		return st, nil
 	}
-	worker := NewDefaultWorker(pool, getStateTree, getWeightTest, consensus.NewDefaultProcessor(), &th.TestView{}, bs, cst, addrs[3], th.BlockTimeTest)
+	worker := mining.NewDefaultWorkerWithDeps(pool, getStateTree, getWeightTest, consensus.NewDefaultProcessor(),
+		&th.TestView{}, bs, cst, addrs[3], blockSignerAddr, mockSigner, th.BlockTimeTest, CreatePoSTFunc)
 
 	assert.Len(pool.Pending(), 0)
 	baseBlock := types.Block{
@@ -338,12 +365,17 @@ func TestGenerateWithoutMessages(t *testing.T) {
 func TestGenerateError(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
+
+	CreatePoSTFunc := func() {}
+
 	ctx := context.Background()
+	mockSigner, blockSignerAddr := setupSigner()
 	newCid := types.NewCidForTestGetter()
 
-	st, pool, addrs, cst, bs := sharedSetup(t)
+	st, pool, addrs, cst, bs := sharedSetup(t, mockSigner)
 
-	worker := NewDefaultWorker(pool, makeExplodingGetStateTree(st), getWeightTest, consensus.NewDefaultProcessor(), &th.TestView{}, bs, cst, addrs[3], th.BlockTimeTest)
+	worker := mining.NewDefaultWorkerWithDeps(pool, makeExplodingGetStateTree(st), getWeightTest, consensus.NewDefaultProcessor(),
+		&th.TestView{}, bs, cst, addrs[3], blockSignerAddr, mockSigner, th.BlockTimeTest, CreatePoSTFunc)
 
 	// This is actually okay and should result in a receipt
 	msg := types.NewMessage(addrs[0], addrs[1], 0, nil, "", nil)
@@ -366,20 +398,20 @@ func TestGenerateError(t *testing.T) {
 	assert.Len(pool.Pending(), 1) // No messages are removed from the pool.
 }
 
-type StateTreeForTest struct {
+type stateTreeForTest struct {
 	state.Tree
 	TestFlush func(ctx context.Context) (cid.Cid, error)
 }
 
-func WrapStateTreeForTest(st state.Tree) *StateTreeForTest {
-	stt := StateTreeForTest{
+func wrapStateTreeForTest(st state.Tree) *stateTreeForTest {
+	stt := stateTreeForTest{
 		st,
 		st.Flush,
 	}
 	return &stt
 }
 
-func (st *StateTreeForTest) Flush(ctx context.Context) (cid.Cid, error) {
+func (st *stateTreeForTest) Flush(ctx context.Context) (cid.Cid, error) {
 	return st.TestFlush(ctx)
 }
 
@@ -393,11 +425,19 @@ func getWeightTest(c context.Context, ts consensus.TipSet) (uint64, error) {
 
 func makeExplodingGetStateTree(st state.Tree) func(context.Context, consensus.TipSet) (state.Tree, error) {
 	return func(c context.Context, ts consensus.TipSet) (state.Tree, error) {
-		stt := WrapStateTreeForTest(st)
+		stt := wrapStateTreeForTest(st)
 		stt.TestFlush = func(ctx context.Context) (cid.Cid, error) {
 			return cid.Undef, errors.New("boom no flush")
 		}
 
 		return stt, nil
 	}
+}
+
+func setupSigner() (types.MockSigner, address.Address) {
+	seed := types.GenerateKeyInfoSeed()
+	ki := types.MustGenerateKeyInfo(10, seed)
+	mockSigner := types.NewMockSigner(ki)
+	blockSignerAddr := mockSigner.Addresses[len(mockSigner.Addresses)-1]
+	return mockSigner, blockSignerAddr
 }
