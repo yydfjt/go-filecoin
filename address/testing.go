@@ -1,5 +1,6 @@
 package address
 
+/*
 import "fmt"
 
 // NewForTestGetter returns a closure that returns an address unique to that invocation.
@@ -12,3 +13,4 @@ func NewForTestGetter() func() Address {
 		return MakeTestAddress(s)
 	}
 }
+*/

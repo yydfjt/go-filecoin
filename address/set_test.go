@@ -1,5 +1,6 @@
 package address
 
+/*
 import (
 	"testing"
 
@@ -35,3 +36,5 @@ func TestSetRoundtrip(t *testing.T) {
 		assert.True(ok)
 	}
 }
+
+*/

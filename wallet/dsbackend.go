@@ -145,6 +145,7 @@ func (backend *DSBackend) SignBytes(data []byte, addr address.Address) (types.Si
 		return nil, err
 	}
 
+	// TODO make this return a generic interface for priv/pub keys so we can use it with BLS keys and SECP
 	privateKey, _, err := keysFromInfo(ki)
 	if err != nil {
 		return nil, err

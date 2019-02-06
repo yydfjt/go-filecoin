@@ -1,41 +1,66 @@
 package address
 
 import (
-	"gx/ipfs/QmZo5avr9dhVVRzcpKnU9ZGQuPaU62pbufUHXBNB7GwLzQ/go-basex"
+	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
+
+	"github.com/filecoin-project/go-filecoin/bls-signatures"
 )
 
-// HashLength is the length of an the hash part of the address in bytes.
-const HashLength = 20
+// Network represents which network an address belongs to.
+type Network = byte
 
-// Length is the lengh of a full address in bytes.
-const Length = 1 + 1 + HashLength
+const (
+	// Mainnet is the main network.
+	Mainnet Network = iota
+	// Testnet is the test network.
+	Testnet
+)
 
-// Version is the current version of the address format.
-const Version byte = 0
+// Type represents the type of data address data holds
+type Type = byte
 
-// Base32Charset is the character set used for base32 encoding in addresses.
-const Base32Charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+const (
+	// SECP256K1 means the address is the hash of a secp256k1 public key
+	SECP256K1 Type = iota
+	// ID means the address is an actor ID
+	ID
+	// Actor means the address is an acotr address, which is a fixed address
+	Actor
+	// BLS means the address is a full BLS public key
+	BLS
+)
 
-// Base32CharsetReverse is the reverse character set. It maps ASCII byte -> Base32Charset index on [0,31].
-var Base32CharsetReverse = [128]int8{
-	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-	15, -1, 10, 17, 21, 20, 26, 30, 7, 5, -1, -1, -1, -1, -1, -1,
-	-1, 29, -1, 24, 13, 25, 9, 8, 23, -1, 18, 22, 31, 27, 19, -1,
-	1, 0, 3, 16, 11, 28, 12, 14, 6, 4, 2, -1, -1, -1, -1, -1,
-	-1, 29, -1, 24, 13, 25, 9, 8, 23, -1, 18, 22, 31, 27, 19, -1,
-	1, 0, 3, 16, 11, 28, 12, 14, 6, 4, 2, -1, -1, -1, -1, -1,
-}
-
-// Base32 is a basex instance using the Base32Charset.
-var Base32 = basex.NewAlphabet(Base32Charset)
+const (
+	LEN_SECP256K1 = SecpHashLength
+	LEN_Actor     = SecpHashLength
+	LEN_ID        = 8
+	LEN_BLS       = bls.PrivateKeyBytes
+)
 
 var (
+	// ErrUnknownNetwork is returned when encountering an unknown network in an address.
+	ErrUnknownNetwork = errors.New("unknown network")
+	// ErrUnknownType is returned when encountering an unknown address type.
+	ErrUnknownType = errors.New("unknown type")
+	// ErrInvalidBytes is returned when encountering an invalid byte format.
+	ErrInvalidBytes = errors.New("invalid bytes")
+	// ErrInvalidChecksum is returned when encountering an invalid checksum.
+	ErrInvalidChecksum = errors.New("invalid checksum")
+	// ErrSeralizeEmpty is returned when seralize is called on an empty address.
+	ErrSeralizeEmpty = errors.New("cannot seralize an empy address")
+	// ErrDeseralizeEmpty is returned when deseralize is called on an empty data.
+	ErrDeseralizeEmpty = errors.New("cannot seralize an empy address")
+)
+
+// TODO all this below stuff needs to go
+var (
+	// TODO Should probably stop using this pattern
 	// TestAddress is an account with some initial funds in it
 	TestAddress Address
+	// TODO Should probably stop using this pattern
 	// TestAddress2 is an account with some initial funds in it
 	TestAddress2 Address
+
 	// NetworkAddress is the filecoin network
 	NetworkAddress Address
 	// StorageMarketAddress is the hard-coded address of the filecoin storage market
@@ -44,6 +69,8 @@ var (
 	PaymentBrokerAddress Address
 )
 
+// TODO Should probably stop using this pattern
+/*
 func init() {
 	t := Hash([]byte("satoshi"))
 	TestAddress = NewMainnet(t)
@@ -60,3 +87,4 @@ func init() {
 	p := Hash([]byte("payments"))
 	PaymentBrokerAddress = NewMainnet(p)
 }
+*/

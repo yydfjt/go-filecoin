@@ -14,6 +14,8 @@ func init() {
 // Set is a set of addresses
 type Set map[Address]struct{}
 
+const Length = 22
+
 var addrSetEntry = atlas.BuildEntry(Set{}).Transform().
 	TransformMarshal(atlas.MakeMarshalTransformFunc(
 		func(s Set) ([]byte, error) {
@@ -38,11 +40,7 @@ var addrSetEntry = atlas.BuildEntry(Set{}).Transform().
 				if end > len(vals) {
 					end = len(vals)
 				}
-				s, err := NewFromBytes(vals[i:end])
-				if err != nil {
-					return nil, err
-				}
-				out[s] = struct{}{}
+				out[Address(vals[i:end])] = struct{}{}
 			}
 			return out, nil
 		})).

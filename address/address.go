@@ -1,72 +1,196 @@
 package address
 
 import (
-	"fmt"
-	"strings"
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/binary"
 
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmZp3eKdYQHHAneECmeK6HhiMwTPufmjC8DuuaGKv3unvx/blake2b-simd"
+	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+
+	"github.com/btcsuite/btcutil/base58"
+
+	"github.com/filecoin-project/go-filecoin/bls-signatures"
+	"github.com/filecoin-project/go-filecoin/crypto"
 )
+
+var log = logging.Logger("address")
 
 func init() {
-	// cbor.RegisterCborType(Address{})
+	logging.SetDebugLogging()
 }
 
-var hashConfig = &blake2b.Config{Size: HashLength}
+// Address is the go type that represents an address in the filecoin network.
+type Address string
 
-// Hash hashes the given input using the default address hashing function,
-// Blake2b 160.
-func Hash(input []byte) []byte {
-	hasher, err := blake2b.New(hashConfig)
-	if err != nil {
-		// If this happens sth is very wrong.
-		panic(fmt.Sprintf("invalid address hash configuration: %v", err))
-	}
-	if _, err := hasher.Write(input); err != nil {
-		// blake2bs Write implementation never returns an error in its current
-		// setup. So if this happens sth went very wrong.
-		panic(fmt.Sprintf("blake2b is unable to process hashes: %v", err))
-	}
-	return hasher.Sum(nil)
+// Network represents which network the address belongs to.
+func (a Address) Network() Network {
+	return a[0]
 }
 
-// MakeTestAddress creates a new testnet address by hashing the given string
-func MakeTestAddress(input string) Address {
-	hash := Hash([]byte(input))
-
-	return NewTestnet(hash)
+// Type represents the type of content contained in the address.
+func (a Address) Type() Type {
+	return a[1]
 }
 
-// Network represents which network an address belongs to.
-type Network = byte
+// Data represents the content contained in the address.
+func (a Address) Data() []byte {
+	return []byte(a[2:])
+}
 
-const (
-	// Mainnet is the main network.
-	Mainnet Network = iota
-	// Testnet is the test network.
-	Testnet
-)
+// Empty returns true if the address is empty.
+func (a Address) Empty() bool {
+	return 0 == len(a)
+}
 
-var (
-	// ErrUnknownNetwork is returned when encountering an unknown network in an address.
-	ErrUnknownNetwork = errors.New("unknown network")
-	// ErrUnknownVersion is returned when encountering an unknown address version.
-	ErrUnknownVersion = errors.New("unknown version")
-	// ErrInvalidBytes is returned when encountering an invalid byte format.
-	ErrInvalidBytes = errors.New("invalid bytes")
-)
+// Bytes returns the byte representation of the address.
+func (a Address) Bytes() []byte {
+	return []byte(a)
+}
 
-// NetworkFromString tries to convert the string representation of a network to
-// its binary representation.
-func NetworkFromString(input string) (Network, error) {
-	switch input {
-	case "fc":
-		return Mainnet, nil
-	case "tf":
-		return Testnet, nil
+// String returns the string representation of an address.
+func (a Address) String() string {
+	// TODO sanity ensure the address is not empty
+	// returning an error from the String() methods is really annoying though
+
+	var prefix string
+	switch a.Network() {
+	case Mainnet:
+		prefix = "fc"
+		break
+	case Testnet:
+		prefix = "tf"
+		break
 	default:
-		return 0, ErrUnknownNetwork
+		panic("BAD")
 	}
+	// ID's do not have a checksum, bail
+	if a.Type() == ID {
+		return prefix + base58.Encode(a.suffix())
+	}
+	return prefix + base58.Encode(append(a.suffix(), checksum(a.suffix())...))
+}
+
+func decodeFromString(addr string) (string, Type, []byte, []byte, error) {
+	// | fc | t |...ID...|
+	// | 2  | 1 |   8    |
+	// min length of an address: 11
+	if len(addr) < 11 {
+		return "", 0, []byte{}, []byte{}, ErrInvalidBytes
+	}
+
+	var ntwrk string
+	switch addr[:2] {
+	case "fc":
+		ntwrk = "fc"
+		break
+	case "tf":
+		ntwrk = "tf"
+		break
+	default:
+		return "", 0, []byte{}, []byte{}, ErrInvalidBytes
+	}
+
+	// decode the address to its 4 parts
+	addrRaw := base58.Decode(addr[2:])
+	//    | network | type |    data    |    checksum    |
+	//TODO data extration iswrong
+	return ntwrk, addrRaw[0], addrRaw[1:][:len(addrRaw[1:])-4], addrRaw[:4], nil
+}
+
+// NewFromString tries to parse a given string into a filecoin address.
+func NewFromString(addr string) (Address, error) {
+	// decode the address and break it up into its components
+	ntwrk, typ, data, cksm, err := decodeFromString(addr)
+	if err != nil {
+		return "", err
+	}
+	log.Infof("network: %s, type: %x, data: %v, cksm: %x", ntwrk, typ, data, cksm)
+
+	// check the address network
+	var in []byte
+	switch ntwrk {
+	case "fc":
+		in = append(in, Mainnet)
+	case "tf":
+		in = append(in, Testnet)
+	default:
+		return "", ErrUnknownNetwork
+	}
+
+	// check the address type, data length and checksum
+	switch typ {
+	case SECP256K1:
+		if len(data) != LEN_SECP256K1 {
+			panic(len(data))
+			return "", ErrInvalidBytes
+		}
+		if !verifyChecksum(data, cksm) {
+			return "", ErrInvalidChecksum
+		}
+		break
+	case ID:
+		if len(data) != LEN_ID {
+			return "", ErrInvalidBytes
+		}
+		// ID's do not have a checksum
+		break
+	case Actor:
+		if len(data) != LEN_Actor {
+			return "", ErrInvalidBytes
+		}
+		if !verifyChecksum(data, cksm) {
+			return "", ErrInvalidBytes
+		}
+		break
+	case BLS:
+		if len(data) != LEN_BLS {
+			return "", ErrInvalidBytes
+		}
+		if !verifyChecksum(data, cksm) {
+			return "", ErrInvalidBytes
+		}
+		break
+	default:
+		return "", ErrUnknownType
+	}
+
+	// we didn't error, data is valid
+	in = append(in, typ)
+	return Address(append(in, data...)), nil
+}
+
+// TODO maybe we want to accept a hash instead?
+func NewFromSECP256K1(n Network, pk *ecdsa.PublicKey) (Address, error) {
+	// TODO should we be hashing here?
+	return New(n, SECP256K1, Hash(crypto.ECDSAPubToBytes(pk)))
+}
+
+func NewFromBLS(n Network, pk bls.PublicKey) (Address, error) {
+	return New(n, BLS, pk[:])
+}
+
+func NewFromActorID(n Network, id uint64) (Address, error) {
+	data := make([]byte, 8)
+	binary.PutUvarint(data, id)
+	return New(n, ID, data)
+}
+
+func NewFromActor(n Network, randomData []byte) (Address, error) {
+	return New(n, Actor, randomData)
+}
+
+// New returns an address for network `n`, for data type `t`.
+func New(n Network, t Type, data []byte) (Address, error) {
+	var out []byte
+	if n != Mainnet && n != Testnet {
+		return "", ErrUnknownNetwork
+	}
+	if t != SECP256K1 && t != ID && t != Actor && t != BLS {
+		return "", ErrUnknownType
+	}
+	out = append([]byte{n, t}, data...)
+	return Address(out), nil
 }
 
 // NetworkToString creates a human readable representation of the network.
@@ -81,293 +205,18 @@ func NetworkToString(n Network) string {
 	}
 }
 
-// Address is the go type that represents an address in the filecoin network.
-type Address [Length]byte
-
-// NewMainnet constructs a new mainnet address.
-func NewMainnet(hash []byte) Address {
-	return New(Mainnet, hash)
+func checksum(data []byte) []byte {
+	// checksum is the last 4 bytes of the sha of address type and data
+	cksm := sha256.Sum256(data)
+	return cksm[:4]
 }
 
-// NewTestnet constructs a new testnet address.
-func NewTestnet(hash []byte) Address {
-	return New(Testnet, hash)
+func verifyChecksum(data, cksm []byte) bool {
+	maybeCksm := sha256.Sum256(data)
+	return (0 == bytes.Compare(maybeCksm[:4], cksm))
 }
 
-// New constructs a new address for the given nework.
-func New(network Network, hash []byte) Address {
-	var addr [Length]byte
-	addr[0] = network
-	addr[1] = Version
-	copy(addr[2:], hash)
-	return addr
-}
-
-// NewFromString tries to parse a given string into a filecoin address.
-func NewFromString(s string) (Address, error) {
-	networkString, version, hash, err := decode(s)
-	if err != nil {
-		return Address{}, err
-	}
-
-	network, err := NetworkFromString(networkString)
-	if err != nil {
-		return Address{}, err
-	}
-
-	if version != Version {
-		return Address{}, ErrUnknownVersion
-	}
-
-	return New(network, hash), nil
-}
-
-// NewFromBytes tries to create an address from the given bytes.
-func NewFromBytes(raw []byte) (Address, error) {
-	if len(raw) != 22 {
-		return Address{}, ErrInvalidBytes
-	}
-
-	network := raw[0]
-	if network > Testnet {
-		return Address{}, ErrUnknownNetwork
-	}
-
-	version := raw[1]
-	if version != Version {
-		return Address{}, ErrUnknownVersion
-	}
-
-	return New(network, raw[2:]), nil
-}
-
-// ParseError checks if the given address parses as a valid filecoin address.
-func ParseError(addr string) error {
-	hrp, version, data, err := decode(addr)
-	if err != nil {
-		return errors.Wrap(err, "unable to decode")
-	}
-
-	if _, err := NetworkFromString(hrp); err != nil {
-		return errors.Wrap(err, "invalid network")
-	}
-
-	if version != Version {
-		return fmt.Errorf("invalid version: version=%d", version)
-	}
-
-	if len(data) != HashLength {
-		return fmt.Errorf("invalid data length: len=%d", len(data))
-	}
-
-	return nil
-}
-
-// Empty returns true if the address is empty.
-func (a Address) Empty() bool {
-	return a == (Address{})
-}
-
-// Network returns the network of the address.
-func (a Address) Network() Network {
-	return a[0]
-}
-
-// Version returns the version of the address.
-func (a Address) Version() byte {
-	return a[1]
-}
-
-// Hash returns the hash part of the address.
-func (a Address) Hash() []byte {
-	return a[2:]
-}
-
-// Format implements the Formatter interface.
-func (a Address) Format(f fmt.State, c rune) {
-	switch c {
-	case 'v':
-		fmt.Fprintf(f, "[%s - %x - %x]", NetworkToString(a.Network()), a.Version(), a.Hash()) // nolint: errcheck
-	case 's':
-		fmt.Fprintf(f, "%s", a.String()) // nolint: errcheck
-	default:
-		fmt.Fprintf(f, "%"+string(c), a.Bytes()) // nolint: errcheck
-	}
-}
-
-// MarshalText implements the TextMarshaler interface.
-func (a Address) MarshalText() ([]byte, error) {
-	if a == (Address{}) {
-		return nil, nil
-	}
-
-	return []byte(a.String()), nil
-}
-
-// UnmarshalText implements the TextUnmarshaler interface.
-func (a *Address) UnmarshalText(in []byte) error {
-	if len(in) == 0 {
-		return nil
-	}
-
-	out, err := NewFromString(string(in))
-	if err != nil {
-		return err
-	}
-
-	copy(a[:], out[:])
-
-	return nil
-}
-
-func (a Address) String() string {
-	out, err := encode(NetworkToString(a.Network()), a.Version(), a.Hash())
-	if err != nil {
-		// should really not happen
-		panic(err)
-	}
-
-	return out
-}
-
-// Bytes returns the byte representation of the address.
-func (a Address) Bytes() []byte {
-	return a[:]
-}
-
-// --
-// TODO: find a better place for the things below
-
-// encode encodes hrp(human-readable part) a version(byte) and data(32bit data array)
-func encode(hrp string, version byte, data []byte) (string, error) {
-	if len(hrp) != 2 {
-		return "", fmt.Errorf("hrp has invalid length: hrp=%d", len(hrp))
-	}
-	if len(data) != HashLength {
-		return "", fmt.Errorf("data is malformed: data length=%d", len(data))
-	}
-	for p, c := range hrp {
-		if c < 33 || c > 126 {
-			return "", fmt.Errorf("invalid character human-readable part : hrp[%d]=%d", p, c)
-		}
-	}
-	if version > 31 {
-		return "", fmt.Errorf("version too large")
-	}
-
-	hrp = strings.ToLower(hrp)
-	combined := append([]byte{version}, Base32.EncodeToBytes(data)...)
-	sum := createChecksum(hrp, combined)
-
-	toEncode := append(combined, sum...)
-	encoded := make([]byte, len(toEncode))
-
-	for i, p := range toEncode {
-		if p >= 32 {
-			return "", fmt.Errorf("invalid data")
-		}
-		encoded[i] += Base32Charset[p]
-	}
-
-	return hrp + string(encoded), nil
-}
-
-// decode decodes a filecoin address and returns
-// the hrp(human-readable part), version (1byte) and data(32bit data array)
-// or an error.
-func decode(addr string) (string, byte, []byte, error) {
-	if len(addr) < 2 {
-		return "", 0, nil, fmt.Errorf("address too short")
-	}
-	if len(addr) > 41 {
-		return "", 0, nil, fmt.Errorf("too long: len=%d", len(addr))
-	}
-	if strings.ToLower(addr) != addr && strings.ToUpper(addr) != addr {
-		return "", 0, nil, fmt.Errorf("mixed case")
-	}
-	addr = strings.ToLower(addr)
-	hrp := addr[0:2]
-	for p, c := range hrp {
-		if c < 33 || c > 126 {
-			return "", 0, nil, fmt.Errorf("invalid character human-readable part: addr[%d]=%d", p, c)
-		}
-	}
-
-	// check data
-	data := addr[2:]
-	dataBytes := []byte{}
-	for _, b := range data {
-		// alphanumeric only
-		if !((b >= int32('0') && b <= int32('9')) || (b >= int32('A') && b <= int32('Z')) || (b >= int32('a') && b <= int32('z'))) {
-			return "", 0, nil, fmt.Errorf("non alphanumeric character")
-		}
-
-		// exclude [1,b,i,o]
-		if b == int32('1') || b == int32('b') || b == int32('i') || b == int32('o') {
-			return "", 0, nil, fmt.Errorf("invalid character")
-		}
-
-		dataBytes = append(dataBytes, byte(Base32CharsetReverse[int(b)]))
-	}
-
-	if !verifyChecksum(hrp, dataBytes) {
-		return "", 0, nil, fmt.Errorf("invalid checksum")
-	}
-
-	decodedBytes, err := Base32.DecodeFromBytes(dataBytes[1 : len(dataBytes)-6])
-	if err != nil {
-		return "", 0, nil, err
-	}
-	if len(decodedBytes) != HashLength {
-		return "", 0, nil, fmt.Errorf("invalid data size: len=%d", len(decodedBytes))
-	}
-	return hrp, dataBytes[0], decodedBytes, nil
-}
-
-var generator = []uint32{0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3}
-
-func polymod(values []byte) uint32 {
-	chk := uint32(1)
-	var b byte
-	for _, v := range values {
-		b = byte(chk >> 25)
-		chk = (chk&0x1ffffff)<<5 ^ uint32(v)
-		for i := 0; i < 5; i++ {
-			if (b>>uint(i))&1 == 1 {
-				chk ^= generator[i]
-			}
-		}
-	}
-	return chk
-}
-
-func hrpExpand(hrp string) []byte {
-	out := []byte{}
-	for _, char := range hrp {
-		out = append(out, byte(char>>5))
-	}
-
-	out = append(out, 0)
-
-	for _, char := range hrp {
-		out = append(out, byte(char&31))
-	}
-
-	return out
-}
-
-func verifyChecksum(hrp string, data []byte) bool {
-	return polymod(append(hrpExpand(hrp), data...)) == 1
-}
-
-func createChecksum(hrp string, data []byte) []byte {
-	values := append(append(hrpExpand(hrp), data...), []byte{0, 0, 0, 0, 0, 0}...)
-	mod := polymod(values) ^ 1
-
-	checksum := make([]byte, 6)
-	for p := range checksum {
-		checksum[p] = byte((mod >> uint32(5*(5-p))) & 0x1f & 31)
-	}
-
-	return checksum
+// Address sufix is everything encoded on an address. All but the first byte.
+func (a Address) suffix() []byte {
+	return []byte(a[1:])
 }

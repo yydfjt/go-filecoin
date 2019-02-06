@@ -21,6 +21,7 @@ type KeyInfo struct {
 	// Private key as bytes
 	PrivateKey []byte `json:"privateKey"`
 	// Curve used to generate private key
+	// TODO we should rename this to TYPE, since the curve _and the signing method_ will be different
 	Curve string `json:"curve"`
 }
 
