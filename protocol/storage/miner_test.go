@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/deal"
 	"testing"
 	"time"
 
@@ -50,20 +51,20 @@ func TestReceiveStorageProposal(t *testing.T) {
 		porcelainAPI := newminerTestPorcelain()
 		miner := Miner{
 			porcelainAPI: porcelainAPI,
-			proposalAcceptor: func(ctx context.Context, m *Miner, p *DealProposal) (*DealResponse, error) {
+			proposalAcceptor: func(ctx context.Context, m *Miner, p *deal.Proposal) (*deal.Response, error) {
 				accepted = true
-				return &DealResponse{}, nil
+				return &deal.Response{}, nil
 			},
-			proposalRejector: func(ctx context.Context, m *Miner, p *DealProposal, reason string) (*DealResponse, error) {
+			proposalRejector: func(ctx context.Context, m *Miner, p *deal.Proposal, reason string) (*deal.Response, error) {
 				rejected = true
-				return &DealResponse{Message: reason}, nil
+				return &deal.Response{Message: reason}, nil
 			},
 		}
 
 		// configure storage price
 		porcelainAPI.config.Set("mining.storagePrice", `"50"`)
 
-		proposal := &DealProposal{
+		proposal := &deal.Proposal{
 			TotalPrice: types.NewAttoFILFromFIL(75),
 		}
 
@@ -84,20 +85,20 @@ func TestReceiveStorageProposal(t *testing.T) {
 		porcelainAPI := newminerTestPorcelain()
 		miner := Miner{
 			porcelainAPI: porcelainAPI,
-			proposalAcceptor: func(ctx context.Context, m *Miner, p *DealProposal) (*DealResponse, error) {
+			proposalAcceptor: func(ctx context.Context, m *Miner, p *deal.Proposal) (*deal.Response, error) {
 				accepted = true
-				return &DealResponse{}, nil
+				return &deal.Response{}, nil
 			},
-			proposalRejector: func(ctx context.Context, m *Miner, p *DealProposal, reason string) (*DealResponse, error) {
+			proposalRejector: func(ctx context.Context, m *Miner, p *deal.Proposal, reason string) (*deal.Response, error) {
 				rejected = true
-				return &DealResponse{Message: reason}, nil
+				return &deal.Response{Message: reason}, nil
 			},
 		}
 
 		// configure storage price
 		porcelainAPI.config.Set("mining.storagePrice", `"50"`)
 
-		proposal := &DealProposal{
+		proposal := &deal.Proposal{
 			TotalPrice: types.NewAttoFILFromFIL(25),
 		}
 

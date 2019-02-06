@@ -2,6 +2,8 @@ package plumbing
 
 import (
 	"context"
+	"github.com/filecoin-project/go-filecoin/plumbing/dls"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/deal"
 
 	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
 	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
@@ -29,6 +31,7 @@ type API struct {
 	msgWaiter  *msg.Waiter
 	config     *cfg.Config
 	chain      *chn.Lser
+	deals      *dls.Lser
 }
 
 // APIDeps contains all the API's dependencies
@@ -39,6 +42,7 @@ type APIDeps struct {
 	MsgWaiter  *msg.Waiter
 	Config     *cfg.Config
 	Chain      *chn.Lser
+	Deals      *dls.Lser
 }
 
 // New constructs a new instance of the API.
@@ -52,6 +56,7 @@ func New(deps *APIDeps) *API {
 		msgWaiter:  deps.MsgWaiter,
 		config:     deps.Config,
 		chain:      deps.Chain,
+		deals:      deps.Deals,
 	}
 }
 
@@ -105,4 +110,9 @@ func (api *API) ConfigGet(dottedPath string) (interface{}, error) {
 // ChainLs returns a channel of tipsets from head to genesis
 func (api *API) ChainLs(ctx context.Context) <-chan interface{} {
 	return api.chain.Ls(ctx)
+}
+
+// DealsLs returns a channel of deals and a channel of errors
+func (api *API) DealsLs() (<-chan *deal.Deal, <-chan error) {
+	return api.deals.Ls()
 }

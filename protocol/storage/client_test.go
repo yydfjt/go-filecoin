@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/deal"
 	"math/big"
 	"testing"
 
@@ -28,15 +29,15 @@ func TestProposeDeal(t *testing.T) {
 	addressCreator := address.NewForTestGetter()
 	cidCreator := types.NewCidForTestGetter()
 
-	var proposal *DealProposal
+	var proposal *deal.Proposal
 
 	testNode := newTestClientNode(func(request interface{}) (interface{}, error) {
-		p, ok := request.(*DealProposal)
+		p, ok := request.(*deal.Proposal)
 		require.True(ok)
 		proposal = p
 
-		return &DealResponse{
-			State:       Accepted,
+		return &deal.Response{
+			State:       deal.Accepted,
 			Message:     "OK",
 			ProposalCid: p.PieceRef,
 		}, nil
@@ -100,7 +101,7 @@ func TestProposeDeal(t *testing.T) {
 	t.Run("and sends proposal and stores response", func(t *testing.T) {
 		assert.NotNil(dealResponse)
 
-		assert.Equal(Accepted, dealResponse.State)
+		assert.Equal(deal.Accepted, dealResponse.State)
 
 		res, err := testRepo.DealsDs.Query(query.Query{
 			Prefix: "/" + clientDatastorePrefix,
@@ -108,9 +109,9 @@ func TestProposeDeal(t *testing.T) {
 		require.NoError(err)
 
 		// expect one entry to be the response
-		var response *DealResponse
+		var response *deal.Response
 		for entry := range res.Next() {
-			var deal clientDeal
+			var deal deal.Deal
 			require.NoError(cbor.DecodeInto(entry.Value, &deal))
 			response = deal.Response
 		}
@@ -208,11 +209,15 @@ func (tcn *testClientNode) GetFileSize(context.Context, cid.Cid) (uint64, error)
 }
 
 func (tcn *testClientNode) MakeProtocolRequest(ctx context.Context, protocol protocol.ID, peer peer.ID, request interface{}, response interface{}) error {
-	dealResponse := response.(*DealResponse)
+	dealResponse := response.(*deal.Response)
 	res, err := tcn.responder(request)
 	if err != nil {
 		return err
 	}
-	*dealResponse = *res.(*DealResponse)
+	*dealResponse = *res.(*deal.Response)
 	return nil
+}
+
+func (tcn *testClientNode) DealsLs() (chan *deal.Deal, chan error) {
+	return make(chan *deal.Deal), make(chan error)
 }

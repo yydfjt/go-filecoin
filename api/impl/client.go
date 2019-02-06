@@ -2,6 +2,7 @@ package impl
 
 import (
 	"context"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/deal"
 	"io"
 	"math/big"
 
@@ -10,8 +11,8 @@ import (
 
 	imp "gx/ipfs/QmQXze9tG878pa4Euya4rrDpyTNX3kQe4dhCaBzBozGgpe/go-unixfs/importer"
 	uio "gx/ipfs/QmQXze9tG878pa4Euya4rrDpyTNX3kQe4dhCaBzBozGgpe/go-unixfs/io"
-	chunk "gx/ipfs/QmR4QQVkBZsZENRjYFVi8dEtPL3daZRNKk24m4r6WKJHNm/go-ipfs-chunker"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
+	"gx/ipfs/QmR4QQVkBZsZENRjYFVi8dEtPL3daZRNKk24m4r6WKJHNm/go-ipfs-chunker"
+	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
 	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
 	dag "gx/ipfs/QmTQdH4848iTVCJmKXYyRiK72HufWTLYQQ8iN3JaQ8K1Hq/go-merkledag"
 	ipld "gx/ipfs/QmcKKBwfz6FyQdHR2jsXrrF6XeSBXYL86anmWNewpFpoF5/go-ipld-format"
@@ -21,7 +22,6 @@ import (
 	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
 	"github.com/filecoin-project/go-filecoin/address"
 	mapi "github.com/filecoin-project/go-filecoin/api"
-	"github.com/filecoin-project/go-filecoin/protocol/storage"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -57,11 +57,11 @@ func (api *nodeClient) ImportData(ctx context.Context, data io.Reader) (ipld.Nod
 	return imp.BuildDagFromReader(ds, spl)
 }
 
-func (api *nodeClient) ProposeStorageDeal(ctx context.Context, data cid.Cid, miner address.Address, askid uint64, duration uint64, allowDuplicates bool) (*storage.DealResponse, error) {
+func (api *nodeClient) ProposeStorageDeal(ctx context.Context, data cid.Cid, miner address.Address, askid uint64, duration uint64, allowDuplicates bool) (*deal.Response, error) {
 	return api.api.node.StorageMinerClient.ProposeDeal(ctx, miner, data, askid, duration, allowDuplicates)
 }
 
-func (api *nodeClient) QueryStorageDeal(ctx context.Context, prop cid.Cid) (*storage.DealResponse, error) {
+func (api *nodeClient) QueryStorageDeal(ctx context.Context, prop cid.Cid) (*deal.Response, error) {
 	return api.api.node.StorageMinerClient.QueryDeal(ctx, prop)
 }
 

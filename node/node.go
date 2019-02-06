@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/filecoin-project/go-filecoin/plumbing/dls"
 	"math/big"
 	"os"
 	"sync"
@@ -409,6 +410,7 @@ func (nc *Config) Build(ctx context.Context) (*Node, error) {
 		MsgQueryer: msg.NewQueryer(nc.Repo, fcWallet, chainReader, &cstOffline, bs),
 		MsgSender:  msg.NewSender(nc.Repo, fcWallet, chainReader, msgPool, fsub.Publish),
 		MsgWaiter:  msg.NewWaiter(chainReader, bs, &cstOffline),
+		Deals:      dls.New(nc.Repo.DealsDatastore()),
 	}))
 
 	nd := &Node{

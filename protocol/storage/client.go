@@ -22,6 +22,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/address"
 	cbu "github.com/filecoin-project/go-filecoin/cborutil"
 	"github.com/filecoin-project/go-filecoin/porcelain"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/deal"
 	"github.com/filecoin-project/go-filecoin/repo"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/util/convert"
@@ -66,17 +67,12 @@ type clientPorcelainAPI interface {
 	MinerGetAsk(ctx context.Context, minerAddr address.Address, askID uint64) (miner.Ask, error)
 	MinerGetOwnerAddress(ctx context.Context, minerAddr address.Address) (address.Address, error)
 	MinerGetPeerID(ctx context.Context, minerAddr address.Address) (peer.ID, error)
-}
-
-type clientDeal struct {
-	Miner    address.Address
-	Proposal *DealProposal
-	Response *DealResponse
+	DealsLs() (<-chan *deal.Deal, <-chan error)
 }
 
 // Client is used to make deals directly with storage miners.
 type Client struct {
-	deals   map[cid.Cid]*clientDeal
+	deals   map[cid.Cid]*deal.Deal
 	dealsDs repo.Datastore
 	dealsLk sync.Mutex
 
@@ -85,13 +81,13 @@ type Client struct {
 }
 
 func init() {
-	cbor.RegisterCborType(clientDeal{})
+	cbor.RegisterCborType(deal.Deal{})
 }
 
 // NewClient creates a new storage client.
 func NewClient(nd clientNode, api clientPorcelainAPI, dealsDs repo.Datastore) (*Client, error) {
 	smc := &Client{
-		deals:   make(map[cid.Cid]*clientDeal),
+		deals:   make(map[cid.Cid]*deal.Deal),
 		node:    nd,
 		api:     api,
 		dealsDs: dealsDs,
@@ -103,7 +99,7 @@ func NewClient(nd clientNode, api clientPorcelainAPI, dealsDs repo.Datastore) (*
 }
 
 // ProposeDeal is
-func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data cid.Cid, askID uint64, duration uint64, allowDuplicates bool) (*DealResponse, error) {
+func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data cid.Cid, askID uint64, duration uint64, allowDuplicates bool) (*deal.Response, error) {
 	size, err := smc.node.GetFileSize(ctx, data)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to determine the size of the data")
@@ -136,7 +132,7 @@ func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data 
 
 	totalPrice := price.MulBigInt(big.NewInt(int64(size * duration)))
 
-	proposal := &DealProposal{
+	proposal := &deal.Proposal{
 		PieceRef:     data,
 		Size:         types.NewBytesAmount(size),
 		TotalPrice:   totalPrice,
@@ -190,7 +186,7 @@ func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data 
 		return nil, err
 	}
 
-	var response DealResponse
+	var response deal.Response
 	err = smc.node.MakeProtocolRequest(ctx, makeDealProtocol, pid, proposal, &response)
 	if err != nil {
 		return nil, errors.Wrap(err, "error sending proposal")
@@ -209,7 +205,7 @@ func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data 
 	return &response, nil
 }
 
-func (smc *Client) recordResponse(resp *DealResponse, miner address.Address, p *DealProposal, proposalCid cid.Cid) error {
+func (smc *Client) recordResponse(resp *deal.Response, miner address.Address, p *deal.Proposal, proposalCid cid.Cid) error {
 	smc.dealsLk.Lock()
 	defer smc.dealsLk.Unlock()
 	_, ok := smc.deals[proposalCid]
@@ -217,7 +213,7 @@ func (smc *Client) recordResponse(resp *DealResponse, miner address.Address, p *
 		return fmt.Errorf("deal [%s] is already in progress", proposalCid.String())
 	}
 
-	smc.deals[proposalCid] = &clientDeal{
+	smc.deals[proposalCid] = &deal.Deal{
 		Miner:    miner,
 		Proposal: p,
 		Response: resp,
@@ -225,13 +221,13 @@ func (smc *Client) recordResponse(resp *DealResponse, miner address.Address, p *
 	return smc.saveDeal(proposalCid)
 }
 
-func (smc *Client) checkDealResponse(ctx context.Context, resp *DealResponse) error {
+func (smc *Client) checkDealResponse(ctx context.Context, resp *deal.Response) error {
 	switch resp.State {
-	case Rejected:
+	case deal.Rejected:
 		return fmt.Errorf("deal rejected: %s", resp.Message)
-	case Failed:
+	case deal.Failed:
 		return fmt.Errorf("deal failed: %s", resp.Message)
-	case Accepted:
+	case deal.Accepted:
 		return nil
 	default:
 		return fmt.Errorf("invalid proposal response: %s", resp.State)
@@ -250,7 +246,7 @@ func (smc *Client) minerForProposal(c cid.Cid) (address.Address, error) {
 }
 
 // QueryDeal queries an in-progress proposal.
-func (smc *Client) QueryDeal(ctx context.Context, proposalCid cid.Cid) (*DealResponse, error) {
+func (smc *Client) QueryDeal(ctx context.Context, proposalCid cid.Cid) (*deal.Response, error) {
 	mineraddr, err := smc.minerForProposal(proposalCid)
 	if err != nil {
 		return nil, err
@@ -261,8 +257,8 @@ func (smc *Client) QueryDeal(ctx context.Context, proposalCid cid.Cid) (*DealRes
 		return nil, err
 	}
 
-	q := queryRequest{proposalCid}
-	var resp DealResponse
+	q := deal.QueryRequest{proposalCid}
+	var resp deal.Response
 	err = smc.node.MakeProtocolRequest(ctx, queryDealProtocol, minerpid, q, &resp)
 	if err != nil {
 		return nil, errors.Wrap(err, "error querying deal")
@@ -272,21 +268,17 @@ func (smc *Client) QueryDeal(ctx context.Context, proposalCid cid.Cid) (*DealRes
 }
 
 func (smc *Client) loadDeals() error {
-	res, err := smc.dealsDs.Query(query.Query{
-		Prefix: "/" + clientDatastorePrefix,
-	})
-	if err != nil {
-		return errors.Wrap(err, "failed to query deals from datastore")
-	}
+	smc.deals = make(map[cid.Cid]*deal.Deal)
 
-	smc.deals = make(map[cid.Cid]*clientDeal)
-
-	for entry := range res.Next() {
-		var deal clientDeal
-		if err := cbor.DecodeInto(entry.Value, &deal); err != nil {
-			return errors.Wrap(err, "failed to unmarshal deals from datastore")
+	deals, errorc := smc.api.DealsLs()
+	select {
+	case storageDeal, ok := <-deals:
+		if !ok {
+			return nil
 		}
-		smc.deals[deal.Response.ProposalCid] = &deal
+		smc.deals[storageDeal.Response.ProposalCid] = storageDeal
+	case err := <-errorc:
+		return err
 	}
 
 	return nil
@@ -320,7 +312,7 @@ func (smc *Client) LoadVouchersForDeal(dealCid cid.Cid) ([]*paymentbroker.Paymen
 	var results []*paymentbroker.PaymentVoucher
 
 	for entry := range queryResults.Next() {
-		var deal clientDeal
+		var deal deal.Deal
 		if err := cbor.DecodeInto(entry.Value, &deal); err != nil {
 			return results, errors.Wrap(err, "failed to unmarshal deals from datastore")
 		}
