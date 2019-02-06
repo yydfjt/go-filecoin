@@ -34,7 +34,7 @@ const (
 	LEN_SECP256K1 = SecpHashLength
 	LEN_Actor     = SecpHashLength
 	LEN_ID        = 8
-	LEN_BLS       = bls.PrivateKeyBytes
+	LEN_BLS       = bls.PublicKeyBytes
 )
 
 var (

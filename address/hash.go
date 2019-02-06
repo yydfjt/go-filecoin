@@ -22,5 +22,7 @@ func Hash(input []byte) []byte {
 		// setup. So if this happens sth went very wrong.
 		panic(fmt.Sprintf("blake2b is unable to process hashes: %v", err))
 	}
-	return hasher.Sum(nil)
+	h := hasher.Sum(nil)
+	fmt.Println("LEN OF HASH", len(h))
+	return h
 }

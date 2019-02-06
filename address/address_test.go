@@ -48,7 +48,7 @@ func TestNewAddress(t *testing.T) {
 	})
 
 	t.Run("New ID Address", func(t *testing.T) {
-		idAddress, err := NewFromActorID(Testnet, 1)
+		idAddress, err := NewFromActorID(Testnet, uint64(1))
 		assert.NoError(err)
 		fmt.Println(idAddress)
 	})
@@ -81,13 +81,44 @@ func TestAddressDecodeEncode(t *testing.T) {
 		secp256k1Addr, err := NewFromSECP256K1(Testnet, pk)
 		require.NoError(err)
 
-		addrToString := secp256k1Addr.String()
+		addrString := secp256k1Addr.String()
+
+		addrFromString, err := NewFromString(addrString)
+		assert.NoError(err)
+		assert.Equal(secp256k1Addr.Bytes(), addrFromString.Bytes())
+	})
+
+	t.Run("Encode Decode ID Address", func(t *testing.T) {
+		idAddress, err := NewFromActorID(Testnet, uint64(1))
 		require.NoError(err)
 
-		addrFromString, err := NewFromString(addrToString)
+		addrString := idAddress.String()
+
+		addrFromString, err := NewFromString(addrString)
+		assert.NoError(err)
+		assert.Equal(idAddress.Bytes(), addrFromString.Bytes())
+	})
+
+	t.Run("Encode Decode Actor Address", func(t *testing.T) {
+		actorAddress, err := NewFromActor(Testnet, []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
 		assert.NoError(err)
 
-		assert.Equal(secp256k1Addr.Bytes(), addrFromString.Bytes())
+		addrString := actorAddress.String()
 
+		addrFromString, err := NewFromString(addrString)
+		assert.NoError(err)
+		assert.Equal(actorAddress.Bytes(), addrFromString.Bytes())
+	})
+
+	t.Run("Encode Decode BLS Address", func(t *testing.T) {
+		blsAddress, err := NewFromBLS(Testnet, bls.PrivateKeyPublicKey((bls.PrivateKeyGenerate())))
+		assert.NoError(err)
+		fmt.Println(blsAddress)
+
+		addrString := blsAddress.String()
+
+		addrFromString, err := NewFromString(addrString)
+		assert.NoError(err)
+		assert.Equal(blsAddress.Bytes(), addrFromString.Bytes())
 	})
 }
