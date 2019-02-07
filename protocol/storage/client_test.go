@@ -104,7 +104,7 @@ func TestProposeDeal(t *testing.T) {
 		assert.Equal(deal.Accepted, dealResponse.State)
 
 		res, err := testRepo.DealsDs.Query(query.Query{
-			Prefix: "/" + clientDatastorePrefix,
+			Prefix: "/" + deal.ClientDatastorePrefix,
 		})
 		require.NoError(err)
 
@@ -218,6 +218,18 @@ func (tcn *testClientNode) MakeProtocolRequest(ctx context.Context, protocol pro
 	return nil
 }
 
-func (tcn *testClientNode) DealsLs() (chan *deal.Deal, chan error) {
-	return make(chan *deal.Deal), make(chan error)
+func (ctp *clientTestAPI) DealsLs() (<-chan *deal.Deal, <-chan error) {
+	out, errOrDoneC := make(chan *deal.Deal), make(chan error)
+	go func() {
+		defer close(out)
+		defer close(errOrDoneC)
+		out <- &deal.Deal{Miner: address.Address{}, Proposal: &deal.Proposal{}, Response: &deal.Response{
+			State:       deal.Accepted,
+			Message:     "OK",
+			ProposalCid: cid.Cid{},
+		}}
+		errOrDoneC <- nil
+	}()
+
+	return out, errOrDoneC
 }

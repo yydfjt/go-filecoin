@@ -15,7 +15,6 @@ import (
 	"gx/ipfs/QmaoXrM4Z41PD48JY36YqQGKQpLGjyLA2cKcLsES7YddAq/go-libp2p-host"
 	ipld "gx/ipfs/QmcKKBwfz6FyQdHR2jsXrrF6XeSBXYL86anmWNewpFpoF5/go-ipld-format"
 	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
-	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore/query"
 
 	"github.com/filecoin-project/go-filecoin/actor/builtin/miner"
 	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
@@ -30,15 +29,13 @@ import (
 
 const (
 	_ = iota
-	// ErrDupicateDeal indicates that a deal being proposed is a duplicate of an existing deal
-	ErrDupicateDeal
+	// ErrDuplicateDeal indicates that a deal being proposed is a duplicate of an existing deal
+	ErrDuplicateDeal
 )
-
-const clientDatastorePrefix = "client"
 
 // Errors map error codes to messages
 var Errors = map[uint8]error{
-	ErrDupicateDeal: errors.New("proposal is a duplicate of existing deal; if you would like to create a duplicate, add the --allow-duplicates flag"),
+	ErrDuplicateDeal: errors.New("proposal is a duplicate of existing deal; if you would like to create a duplicate, add the --allow-duplicates flag"),
 }
 
 const (
@@ -149,7 +146,7 @@ func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data 
 
 	_, isDuplicate := smc.deals[proposalCid]
 	if isDuplicate && !allowDuplicates {
-		return nil, Errors[ErrDupicateDeal]
+		return nil, Errors[ErrDuplicateDeal]
 	}
 
 	for ; isDuplicate; _, isDuplicate = smc.deals[proposalCid] {
@@ -257,7 +254,7 @@ func (smc *Client) QueryDeal(ctx context.Context, proposalCid cid.Cid) (*deal.Re
 		return nil, err
 	}
 
-	q := deal.QueryRequest{proposalCid}
+	q := deal.QueryRequest{Cid: proposalCid}
 	var resp deal.Response
 	err = smc.node.MakeProtocolRequest(ctx, queryDealProtocol, minerpid, q, &resp)
 	if err != nil {
@@ -270,31 +267,27 @@ func (smc *Client) QueryDeal(ctx context.Context, proposalCid cid.Cid) (*deal.Re
 func (smc *Client) loadDeals() error {
 	smc.deals = make(map[cid.Cid]*deal.Deal)
 
-	deals, errorc := smc.api.DealsLs()
+	deals, doneOrError := smc.api.DealsLs()
 	select {
-	case storageDeal, ok := <-deals:
-		if !ok {
-			return nil
-		}
+	case storageDeal := <-deals:
 		smc.deals[storageDeal.Response.ProposalCid] = storageDeal
-	case err := <-errorc:
-		return err
+	case errOrNil := <-doneOrError:
+		return errOrNil
 	}
-
 	return nil
 }
 
 func (smc *Client) saveDeal(cid cid.Cid) error {
-	deal, ok := smc.deals[cid]
+	storageDeal, ok := smc.deals[cid]
 	if !ok {
 		return errors.Errorf("Could not find client deal with cid: %s", cid.String())
 	}
-	datum, err := cbor.DumpObject(deal)
+	datum, err := cbor.DumpObject(storageDeal)
 	if err != nil {
 		return errors.Wrap(err, "could not marshal storageDeal")
 	}
 
-	key := datastore.KeyWithNamespaces([]string{clientDatastorePrefix, cid.String()})
+	key := datastore.KeyWithNamespaces([]string{deal.ClientDatastorePrefix, cid.String()})
 	err = smc.dealsDs.Put(key, datum)
 	if err != nil {
 		return errors.Wrap(err, "could not save client deal to disk, in-memory deals differ from persisted deals!")
@@ -304,23 +297,17 @@ func (smc *Client) saveDeal(cid cid.Cid) error {
 
 // LoadVouchersForDeal loads vouchers from disk for a given deal
 func (smc *Client) LoadVouchersForDeal(dealCid cid.Cid) ([]*paymentbroker.PaymentVoucher, error) {
-	queryResults, err := smc.dealsDs.Query(query.Query{Prefix: "/" + clientDatastorePrefix})
-	if err != nil {
-		return []*paymentbroker.PaymentVoucher{}, errors.Wrap(err, "failed to query vouchers from datastore")
-	}
-
 	var results []*paymentbroker.PaymentVoucher
 
-	for entry := range queryResults.Next() {
-		var deal deal.Deal
-		if err := cbor.DecodeInto(entry.Value, &deal); err != nil {
-			return results, errors.Wrap(err, "failed to unmarshal deals from datastore")
+	deals, doneOrError := smc.api.DealsLs()
+	select {
+	case storageDeal := <-deals:
+		if storageDeal.Response.ProposalCid == dealCid {
+			results = append(results, storageDeal.Proposal.Payment.Vouchers...)
 		}
-		if deal.Response.ProposalCid == dealCid {
-			results = append(results, deal.Proposal.Payment.Vouchers...)
-		}
+	case errOrNil := <-doneOrError:
+		return results, errOrNil
 	}
-
 	return results, nil
 }
 

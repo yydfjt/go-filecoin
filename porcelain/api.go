@@ -10,6 +10,7 @@ import (
 	minerActor "github.com/filecoin-project/go-filecoin/actor/builtin/miner"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/plumbing"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/deal"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -75,4 +76,9 @@ func (a *API) MinerGetPeerID(ctx context.Context, minerAddr address.Address) (pe
 // MinerSetPrice configures the price of storage. See implementation for details.
 func (a *API) MinerSetPrice(ctx context.Context, from address.Address, miner address.Address, gasPrice types.AttoFIL, gasLimit types.GasUnits, price *types.AttoFIL, expiry *big.Int) (MinerSetPriceResponse, error) {
 	return MinerSetPrice(ctx, a, from, miner, gasPrice, gasLimit, price, expiry)
+}
+
+// DealsLs returns a channel of all deals and a channel for errors or done
+func (a *API) DealsLs() (<-chan *deal.Deal, <-chan error) {
+	return DealsLs(a)
 }

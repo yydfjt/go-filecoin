@@ -9,42 +9,40 @@ import (
 	"github.com/filecoin-project/go-filecoin/repo"
 )
 
-// Lser is plumbing implementation for inspecting deals
-type Lser struct {
+// Querier is plumbing implementation querying deals
+type Querier struct {
 	dealsDs repo.Datastore
 }
 
-// New returns a new Lser.
-func New(dealsDatastore repo.Datastore) *Lser {
-	return &Lser{dealsDs: dealsDatastore}
+// New returns a new Querier.
+func New(dealsDatastore repo.Datastore) *Querier {
+	return &Querier{dealsDs: dealsDatastore}
 }
 
-// Ls returns a channel historical tip sets from head to genesis
-// If an error is encountered while reading the chain, the error is sent, and the channel is closed.
-func (lser *Lser) Ls() (<-chan *deal.Deal, <-chan error) {
+// Find returns a channel of deals matching the given query.
+func (querier *Querier) Find(qry query.Query) (<-chan *deal.Deal, <-chan error) {
 	out := make(chan *deal.Deal)
-	errorc := make(chan error, 1)
+	errorOrDoneC := make(chan error, 1)
 
 	go func() {
 		defer close(out)
-		defer close(errorc)
+		defer close(errorOrDoneC)
 
-		results, err := lser.dealsDs.Query(query.Query{
-			Prefix: "/" + deal.ClientDatastorePrefix,
-		})
+		results, err := querier.dealsDs.Query(qry)
 		if err != nil {
-			errorc <- errors.Wrap(err, "failed to query deals from datastore")
+			errorOrDoneC <- errors.Wrap(err, "failed to query deals from datastore")
 			return
 		}
 		for entry := range results.Next() {
 			var storageDeal deal.Deal
 			if err := cbor.DecodeInto(entry.Value, &storageDeal); err != nil {
-				errorc <- errors.Wrap(err, "failed to unmarshal deals from datastore")
+				errorOrDoneC <- errors.Wrap(err, "failed to unmarshal deals from datastore")
 				return
 			}
 			out <- &storageDeal
 		}
+		errorOrDoneC <- nil
 	}()
 
-	return out, errorc
+	return out, errorOrDoneC
 }

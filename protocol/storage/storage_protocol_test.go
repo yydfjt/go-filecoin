@@ -8,7 +8,7 @@ import (
 
 	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
 	"github.com/filecoin-project/go-filecoin/address"
-	. "github.com/filecoin-project/go-filecoin/protocol/storage"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/deal"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/stretchr/testify/require"
 )
@@ -20,7 +20,7 @@ func TestSerializeProposal(t *testing.T) {
 
 	ag := address.NewForTestGetter()
 	cg := types.NewCidForTestGetter()
-	p := &DealProposal{}
+	p := &deal.Proposal{}
 	p.Size = types.NewBytesAmount(5)
 	p.Payment.ChannelMsgCid = cg().String()
 	p.Payment.Channel = types.NewChannelID(4)
@@ -38,6 +38,6 @@ func TestSerializeProposal(t *testing.T) {
 	chunk, err := cbor.DumpObject(p)
 	require.NoError(err)
 
-	err = cbor.DecodeInto(chunk, &DealProposal{})
+	err = cbor.DecodeInto(chunk, &deal.Proposal{})
 	require.NoError(err)
 }
