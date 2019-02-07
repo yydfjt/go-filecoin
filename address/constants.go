@@ -31,10 +31,14 @@ const (
 )
 
 const (
+	// length of address data containing a hash of Secp256k1 public key
 	LEN_SECP256K1 = SecpHashLength
-	LEN_Actor     = SecpHashLength
-	LEN_ID        = 8
-	LEN_BLS       = bls.PublicKeyBytes
+	// length of address data containing a hash of actor address //TODO better def
+	LEN_Actor = SecpHashLength
+	// length of address data containing an actor ID
+	LEN_ID = 8
+	// length of address data containing a BLS public key
+	LEN_BLS = bls.PublicKeyBytes
 )
 
 var (
@@ -46,15 +50,10 @@ var (
 	ErrInvalidBytes = errors.New("invalid bytes")
 	// ErrInvalidChecksum is returned when encountering an invalid checksum.
 	ErrInvalidChecksum = errors.New("invalid checksum")
-	// ErrSeralizeEmpty is returned when seralize is called on an empty address.
-	ErrSeralizeEmpty = errors.New("cannot seralize an empy address")
-	// ErrDeseralizeEmpty is returned when deseralize is called on an empty data.
-	ErrDeseralizeEmpty = errors.New("cannot seralize an empy address")
 )
 
-// TODO all this below stuff needs to go
 var (
-	// TODO Should probably stop using this pattern
+	// TODO Should please stop using this pattern
 	// TestAddress is an account with some initial funds in it
 	TestAddress Address
 	// TODO Should probably stop using this pattern
@@ -69,22 +68,37 @@ var (
 	PaymentBrokerAddress Address
 )
 
-// TODO Should probably stop using this pattern
-/*
 func init() {
+	var err error
 	t := Hash([]byte("satoshi"))
-	TestAddress = NewMainnet(t)
+	// TODO Should please stop using this pattern
+	TestAddress, err = NewFromActor(Mainnet, t)
+	if err != nil {
+		panic(err)
+	}
 
 	t = Hash([]byte("nakamoto"))
-	TestAddress2 = NewMainnet(t)
+	// TODO Should please stop using this pattern
+	TestAddress2, err = NewFromActor(Mainnet, t)
+	if err != nil {
+		panic(err)
+	}
 
 	n := Hash([]byte("filecoin"))
-	NetworkAddress = NewMainnet(n)
+	NetworkAddress, err = NewFromActor(Mainnet, n)
+	if err != nil {
+		panic(err)
+	}
 
 	s := Hash([]byte("storage"))
-	StorageMarketAddress = NewMainnet(s)
+	StorageMarketAddress, err = NewFromActor(Mainnet, s)
+	if err != nil {
+		panic(err)
+	}
 
 	p := Hash([]byte("payments"))
-	PaymentBrokerAddress = NewMainnet(p)
+	PaymentBrokerAddress, err = NewFromActor(Mainnet, p)
+	if err != nil {
+		panic(err)
+	}
 }
-*/
