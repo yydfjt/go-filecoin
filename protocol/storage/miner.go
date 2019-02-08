@@ -47,7 +47,6 @@ const queryDealProtocol = protocol.ID("/fil/storage/qry/1.0.0")
 const submitPostGasPrice = 0
 const submitPostGasLimit = 300
 
-const minerDatastorePrefix = "miner"
 const dealsAwatingSealDatastorePrefix = "dealsAwaitingSeal"
 
 // Miner represents a storage miner.
@@ -56,7 +55,7 @@ type Miner struct {
 	minerOwnerAddr address.Address
 
 	// deals is a list of deals we made. It is indexed by the CID of the proposal.
-	deals   map[cid.Cid]*storageDeal
+	deals   map[cid.Cid]*deal.Deal
 	dealsDs repo.Datastore
 	dealsLk sync.Mutex
 
@@ -70,11 +69,6 @@ type Miner struct {
 
 	proposalAcceptor func(ctx context.Context, m *Miner, p *deal.Proposal) (*deal.Response, error)
 	proposalRejector func(ctx context.Context, m *Miner, p *deal.Proposal, reason string) (*deal.Response, error)
-}
-
-type storageDeal struct {
-	Proposal *deal.Proposal
-	Response *deal.Response
 }
 
 // porcelainAPI is the subset of the porcelain API that storage.Miner needs.
@@ -105,7 +99,6 @@ type generatePostInput struct {
 }
 
 func init() {
-	cbor.RegisterCborType(storageDeal{})
 	cbor.RegisterCborType(dealsAwaitingSealStruct{})
 }
 
@@ -114,7 +107,7 @@ func NewMiner(ctx context.Context, minerAddr, minerOwnerAddr address.Address, nd
 	sm := &Miner{
 		minerAddr:        minerAddr,
 		minerOwnerAddr:   minerOwnerAddr,
-		deals:            make(map[cid.Cid]*storageDeal),
+		deals:            make(map[cid.Cid]*deal.Deal),
 		porcelainAPI:     porcelainAPI,
 		dealsDs:          dealsDs,
 		node:             nd,
@@ -203,7 +196,8 @@ func acceptProposal(ctx context.Context, sm *Miner, p *deal.Proposal) (*deal.Res
 	sm.dealsLk.Lock()
 	defer sm.dealsLk.Unlock()
 
-	sm.deals[proposalCid] = &storageDeal{
+	sm.deals[proposalCid] = &deal.Deal{
+		Miner:    sm.minerAddr,
 		Proposal: p,
 		Response: resp,
 	}
@@ -235,7 +229,8 @@ func rejectProposal(ctx context.Context, sm *Miner, p *deal.Proposal, reason str
 	sm.dealsLk.Lock()
 	defer sm.dealsLk.Unlock()
 
-	sm.deals[proposalCid] = &storageDeal{
+	sm.deals[proposalCid] = &deal.Deal{
+		Miner:    sm.minerAddr,
 		Proposal: p,
 		Response: resp,
 	}
@@ -246,7 +241,7 @@ func rejectProposal(ctx context.Context, sm *Miner, p *deal.Proposal, reason str
 	return resp, nil
 }
 
-func (sm *Miner) getStorageDeal(c cid.Cid) *storageDeal {
+func (sm *Miner) getStorageDeal(c cid.Cid) *deal.Deal {
 	sm.dealsLk.Lock()
 	defer sm.dealsLk.Unlock()
 	return sm.deals[c]
@@ -694,32 +689,32 @@ func getFileSize(ctx context.Context, c cid.Cid, dserv ipld.DAGService) (uint64,
 
 func (sm *Miner) loadDeals() error {
 	res, err := sm.dealsDs.Query(query.Query{
-		Prefix: "/" + minerDatastorePrefix,
+		Prefix: "/" + deal.ClientDatastorePrefix,
 	})
 	if err != nil {
 		return errors.Wrap(err, "failed to query deals from datastore")
 	}
 
-	sm.deals = make(map[cid.Cid]*storageDeal)
+	sm.deals = make(map[cid.Cid]*deal.Deal)
 
 	for entry := range res.Next() {
-		var deal storageDeal
-		if err := cbor.DecodeInto(entry.Value, &deal); err != nil {
+		var storageDeal deal.Deal
+		if err := cbor.DecodeInto(entry.Value, &storageDeal); err != nil {
 			return errors.Wrap(err, "failed to unmarshal deals from datastore")
 		}
-		sm.deals[deal.Response.ProposalCid] = &deal
+		sm.deals[storageDeal.Response.ProposalCid] = &storageDeal
 	}
 
 	return nil
 }
 
 func (sm *Miner) saveDeal(proposalCid cid.Cid) error {
-	marshalledDeal, err := cbor.DumpObject(sm.deals[proposalCid])
+	marshaledDeal, err := cbor.DumpObject(sm.deals[proposalCid])
 	if err != nil {
-		return errors.Wrap(err, "Could not marshal storageDeal")
+		return errors.Wrap(err, "Could not marshal deal.Deal")
 	}
-	key := datastore.KeyWithNamespaces([]string{minerDatastorePrefix, proposalCid.String()})
-	err = sm.dealsDs.Put(key, marshalledDeal)
+	key := datastore.KeyWithNamespaces([]string{deal.ClientDatastorePrefix, proposalCid.String()})
+	err = sm.dealsDs.Put(key, marshaledDeal)
 	if err != nil {
 		return errors.Wrap(err, "could not save client storage deal")
 	}

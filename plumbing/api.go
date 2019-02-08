@@ -3,9 +3,8 @@ package plumbing
 import (
 	"context"
 
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
+	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
 	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
-	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore/query"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/exec"
@@ -32,7 +31,7 @@ type API struct {
 	msgWaiter  *msg.Waiter
 	config     *cfg.Config
 	chain      *chn.Lser
-	deals      *dls.Querier
+	deals      *dls.Lser
 }
 
 // APIDeps contains all the API's dependencies
@@ -43,7 +42,7 @@ type APIDeps struct {
 	MsgWaiter  *msg.Waiter
 	Config     *cfg.Config
 	Chain      *chn.Lser
-	Deals      *dls.Querier
+	Deals      *dls.Lser
 }
 
 // New constructs a new instance of the API.
@@ -113,7 +112,7 @@ func (api *API) ChainLs(ctx context.Context) <-chan interface{} {
 	return api.chain.Ls(ctx)
 }
 
-// DealQuery returns a channel of all deals matching the given query and a channel for errors or done
-func (api *API) DealQuery(qry query.Query) (<-chan *deal.Deal, <-chan error) {
-	return api.deals.Query(qry)
+// DealsLs returns a channel of all deals in the local datastore and a channel for errors or done
+func (api *API) DealsLs() (<-chan *deal.Deal, <-chan error) {
+	return api.deals.Ls()
 }

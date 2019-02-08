@@ -79,11 +79,6 @@ func (a *API) MinerSetPrice(ctx context.Context, from address.Address, miner add
 	return MinerSetPrice(ctx, a, from, miner, gasPrice, gasLimit, price, expiry)
 }
 
-// DealsLs returns a channel of all deals and a channel for errors or done
-func (a *API) DealsLs() (<-chan *deal.Deal, <-chan error) {
-	return DealsLs(a)
-}
-
 // DealByCid returns a single deal matching a given cid or an error
 func (a *API) DealByCid(dealCid cid.Cid) (*deal.Deal, error) {
 	return DealByCid(a, dealCid)

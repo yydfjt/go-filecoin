@@ -9,18 +9,18 @@ import (
 	"github.com/filecoin-project/go-filecoin/repo"
 )
 
-// Querier is plumbing implementation querying deals
-type Querier struct {
+// Lser is plumbing implementation querying deals
+type Lser struct {
 	dealsDs repo.Datastore
 }
 
-// New returns a new Querier.
-func New(dealsDatastore repo.Datastore) *Querier {
-	return &Querier{dealsDs: dealsDatastore}
+// New returns a new Lser.
+func New(dealsDatastore repo.Datastore) *Lser {
+	return &Lser{dealsDs: dealsDatastore}
 }
 
-// Query returns a channel of deals matching the given query.
-func (querier *Querier) Query(qry query.Query) (<-chan *deal.Deal, <-chan error) {
+// Ls returns a channel of deals matching the given query.
+func (lser *Lser) Ls() (<-chan *deal.Deal, <-chan error) {
 	out := make(chan *deal.Deal)
 	errorOrDoneC := make(chan error, 1)
 
@@ -28,7 +28,7 @@ func (querier *Querier) Query(qry query.Query) (<-chan *deal.Deal, <-chan error)
 		defer close(out)
 		defer close(errorOrDoneC)
 
-		results, err := querier.dealsDs.Query(qry)
+		results, err := lser.dealsDs.Query(query.Query{Prefix: "/" + deal.ClientDatastorePrefix})
 		if err != nil {
 			errorOrDoneC <- errors.Wrap(err, "failed to query deals from datastore")
 			return
