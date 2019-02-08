@@ -19,8 +19,8 @@ func New(dealsDatastore repo.Datastore) *Querier {
 	return &Querier{dealsDs: dealsDatastore}
 }
 
-// Find returns a channel of deals matching the given query.
-func (querier *Querier) Find(qry query.Query) (<-chan *deal.Deal, <-chan error) {
+// Query returns a channel of deals matching the given query.
+func (querier *Querier) Query(qry query.Query) (<-chan *deal.Deal, <-chan error) {
 	out := make(chan *deal.Deal)
 	errorOrDoneC := make(chan error, 1)
 

@@ -2,6 +2,7 @@ package porcelain
 
 import (
 	"context"
+	"fmt"
 
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
 	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore/query"
@@ -11,21 +12,24 @@ import (
 
 type dlsPlumbing interface {
 	ChainLs(ctx context.Context) <-chan interface{}
-	Find(qry query.Query) (<-chan *deal.Deal, <-chan error)
+	DealQuery(qry query.Query) (<-chan *deal.Deal, <-chan error)
 }
 
 // DealsLs returns a channel of all deals and a channel for errors or done
 func DealsLs(api dlsPlumbing) (<-chan *deal.Deal, <-chan error) {
-	return api.Find(query.Query{Prefix: "/" + deal.ClientDatastorePrefix})
+	return api.DealQuery(query.Query{Prefix: "/" + deal.ClientDatastorePrefix})
 }
 
-// Deal returns a single deal matching a given cid
-func Deal(api dlsPlumbing, cid cid.Cid) (*deal.Deal, error) {
-	dealsC, errorOrDoneC := api.Find(query.Query{Prefix: "/" + deal.ClientDatastorePrefix + "/" + cid.String()})
+// DealByCid returns a single deal matching a given cid or an error
+func DealByCid(api dlsPlumbing, dealCid cid.Cid) (*deal.Deal, error) {
+	dealsC, errorOrDoneC := api.DealQuery(query.Query{Prefix: "/" + deal.ClientDatastorePrefix})
 	select {
 	case storageDeal := <-dealsC:
-		return storageDeal, nil
+		if storageDeal.Response.ProposalCid == dealCid {
+			return storageDeal, nil
+		}
 	case errOrNil := <-errorOrDoneC:
 		return nil, errOrNil
 	}
+	return nil, fmt.Errorf("Could not find deal with CID: %s", dealCid.String())
 }

@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"time"
 
+	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
 	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
 
 	minerActor "github.com/filecoin-project/go-filecoin/actor/builtin/miner"
@@ -81,4 +82,9 @@ func (a *API) MinerSetPrice(ctx context.Context, from address.Address, miner add
 // DealsLs returns a channel of all deals and a channel for errors or done
 func (a *API) DealsLs() (<-chan *deal.Deal, <-chan error) {
 	return DealsLs(a)
+}
+
+// DealByCid returns a single deal matching a given cid or an error
+func (a *API) DealByCid(dealCid cid.Cid) (*deal.Deal, error) {
+	return DealByCid(a, dealCid)
 }

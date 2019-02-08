@@ -65,6 +65,7 @@ type clientPorcelainAPI interface {
 	MinerGetOwnerAddress(ctx context.Context, minerAddr address.Address) (address.Address, error)
 	MinerGetPeerID(ctx context.Context, minerAddr address.Address) (peer.ID, error)
 	DealsLs() (<-chan *deal.Deal, <-chan error)
+	DealByCid(cid.Cid) (*deal.Deal, error)
 }
 
 // Client is used to make deals directly with storage miners.
@@ -297,18 +298,11 @@ func (smc *Client) saveDeal(cid cid.Cid) error {
 
 // LoadVouchersForDeal loads vouchers from disk for a given deal
 func (smc *Client) LoadVouchersForDeal(dealCid cid.Cid) ([]*paymentbroker.PaymentVoucher, error) {
-	var results []*paymentbroker.PaymentVoucher
-
-	deals, doneOrError := smc.api.DealsLs()
-	select {
-	case storageDeal := <-deals:
-		if storageDeal.Response.ProposalCid == dealCid {
-			results = append(results, storageDeal.Proposal.Payment.Vouchers...)
-		}
-	case errOrNil := <-doneOrError:
-		return results, errOrNil
+	storageDeal, err := smc.api.DealByCid(dealCid)
+	if err != nil {
+		return []*paymentbroker.PaymentVoucher{}, err
 	}
-	return results, nil
+	return storageDeal.Proposal.Payment.Vouchers, nil
 }
 
 // ClientNodeImpl implements the client node interface

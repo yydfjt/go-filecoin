@@ -113,7 +113,7 @@ func (api *API) ChainLs(ctx context.Context) <-chan interface{} {
 	return api.chain.Ls(ctx)
 }
 
-// Find returns a channel of all deals matching the given query and a channel for errors or done
-func (api *API) Find(qry query.Query) (<-chan *deal.Deal, <-chan error) {
-	return api.deals.Find(qry)
+// DealQuery returns a channel of all deals matching the given query and a channel for errors or done
+func (api *API) DealQuery(qry query.Query) (<-chan *deal.Deal, <-chan error) {
+	return api.deals.Query(qry)
 }

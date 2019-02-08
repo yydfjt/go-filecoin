@@ -233,3 +233,11 @@ func (ctp *clientTestAPI) DealsLs() (<-chan *deal.Deal, <-chan error) {
 
 	return out, errOrDoneC
 }
+
+func (ctp *clientTestAPI) DealByCid(dealCid cid.Cid) (*deal.Deal, error) {
+	return &deal.Deal{Miner: address.Address{}, Proposal: &deal.Proposal{}, Response: &deal.Response{
+		State:       deal.Accepted,
+		Message:     "OK",
+		ProposalCid: cid.Cid{},
+	}}, nil
+}
