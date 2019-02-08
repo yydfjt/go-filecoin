@@ -40,6 +40,22 @@ func (mtp *minerTestPorcelain) ConfigGet(dottedPath string) (interface{}, error)
 	return mtp.config.Get(dottedPath)
 }
 
+func (mtp *minerTestPorcelain) DealsLs() (<-chan *deal.Deal, <-chan error) {
+	out, errOrDoneC := make(chan *deal.Deal), make(chan error)
+	go func() {
+		defer close(out)
+		defer close(errOrDoneC)
+		out <- &deal.Deal{Miner: address.Address{}, Proposal: &deal.Proposal{}, Response: &deal.Response{
+			State:       deal.Accepted,
+			Message:     "OK",
+			ProposalCid: cid.Cid{},
+		}}
+		errOrDoneC <- nil
+	}()
+
+	return out, errOrDoneC
+}
+
 func TestReceiveStorageProposal(t *testing.T) {
 	t.Run("Accepts proposals with sufficient TotalPrice", func(t *testing.T) {
 		assert := assert.New(t)
@@ -51,11 +67,11 @@ func TestReceiveStorageProposal(t *testing.T) {
 		porcelainAPI := newminerTestPorcelain()
 		miner := Miner{
 			porcelainAPI: porcelainAPI,
-			proposalAcceptor: func(ctx context.Context, m *Miner, p *deal.Proposal) (*deal.Response, error) {
+			proposalAcceptor: func(m *Miner, p *deal.Proposal) (*deal.Response, error) {
 				accepted = true
 				return &deal.Response{}, nil
 			},
-			proposalRejector: func(ctx context.Context, m *Miner, p *deal.Proposal, reason string) (*deal.Response, error) {
+			proposalRejector: func(m *Miner, p *deal.Proposal, reason string) (*deal.Response, error) {
 				rejected = true
 				return &deal.Response{Message: reason}, nil
 			},
@@ -85,11 +101,11 @@ func TestReceiveStorageProposal(t *testing.T) {
 		porcelainAPI := newminerTestPorcelain()
 		miner := Miner{
 			porcelainAPI: porcelainAPI,
-			proposalAcceptor: func(ctx context.Context, m *Miner, p *deal.Proposal) (*deal.Response, error) {
+			proposalAcceptor: func(m *Miner, p *deal.Proposal) (*deal.Response, error) {
 				accepted = true
 				return &deal.Response{}, nil
 			},
-			proposalRejector: func(ctx context.Context, m *Miner, p *deal.Proposal, reason string) (*deal.Response, error) {
+			proposalRejector: func(m *Miner, p *deal.Proposal, reason string) (*deal.Response, error) {
 				rejected = true
 				return &deal.Response{Message: reason}, nil
 			},

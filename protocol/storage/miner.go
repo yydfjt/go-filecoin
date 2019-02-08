@@ -23,7 +23,6 @@ import (
 	ipld "gx/ipfs/QmcKKBwfz6FyQdHR2jsXrrF6XeSBXYL86anmWNewpFpoF5/go-ipld-format"
 	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
 	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
-	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore/query"
 
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor/builtin/miner"
@@ -67,8 +66,8 @@ type Miner struct {
 	porcelainAPI porcelainAPI
 	node         node
 
-	proposalAcceptor func(ctx context.Context, m *Miner, p *deal.Proposal) (*deal.Response, error)
-	proposalRejector func(ctx context.Context, m *Miner, p *deal.Proposal, reason string) (*deal.Response, error)
+	proposalAcceptor func(m *Miner, p *deal.Proposal) (*deal.Response, error)
+	proposalRejector func(m *Miner, p *deal.Proposal, reason string) (*deal.Response, error)
 }
 
 // porcelainAPI is the subset of the porcelain API that storage.Miner needs.
@@ -76,6 +75,7 @@ type porcelainAPI interface {
 	MessageSendWithRetry(ctx context.Context, numRetries uint, waitDuration time.Duration, from, to address.Address, val *types.AttoFIL, method string, gasPrice types.AttoFIL, gasLimit types.GasUnits, params ...interface{}) error
 	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, *exec.FunctionSignature, error)
 	ConfigGet(dottedPath string) (interface{}, error)
+	DealsLs() (<-chan *deal.Deal, <-chan error)
 }
 
 // node is subset of node on which this protocol depends. These deps
@@ -103,7 +103,7 @@ func init() {
 }
 
 // NewMiner is
-func NewMiner(ctx context.Context, minerAddr, minerOwnerAddr address.Address, nd node, dealsDs repo.Datastore, porcelainAPI porcelainAPI) (*Miner, error) {
+func NewMiner(minerAddr, minerOwnerAddr address.Address, nd node, dealsDs repo.Datastore, porcelainAPI porcelainAPI) (*Miner, error) {
 	sm := &Miner{
 		minerAddr:        minerAddr,
 		minerOwnerAddr:   minerOwnerAddr,
@@ -169,15 +169,15 @@ func (sm *Miner) receiveStorageProposal(ctx context.Context, p *deal.Proposal) (
 		return nil, errors.New("Could not retrieve storagePrice from config")
 	}
 	if p.TotalPrice.LessThan(storagePriceAF) {
-		return sm.proposalRejector(ctx, sm, p,
+		return sm.proposalRejector(sm, p,
 			fmt.Sprintf("proposed price %s is less that miner's current asking price: %s", p.TotalPrice, storagePriceAF))
 	}
 
 	// Payment is valid, everything else checks out, let's accept this proposal
-	return sm.proposalAcceptor(ctx, sm, p)
+	return sm.proposalAcceptor(sm, p)
 }
 
-func acceptProposal(ctx context.Context, sm *Miner, p *deal.Proposal) (*deal.Response, error) {
+func acceptProposal(sm *Miner, p *deal.Proposal) (*deal.Response, error) {
 	if sm.node.SectorBuilder() == nil {
 		return nil, errors.New("Mining disabled, can not process proposal")
 	}
@@ -213,7 +213,7 @@ func acceptProposal(ctx context.Context, sm *Miner, p *deal.Proposal) (*deal.Res
 	return resp, nil
 }
 
-func rejectProposal(ctx context.Context, sm *Miner, p *deal.Proposal, reason string) (*deal.Response, error) {
+func rejectProposal(sm *Miner, p *deal.Proposal, reason string) (*deal.Response, error) {
 	proposalCid, err := convert.ToCid(p)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get cid of proposal")
@@ -641,7 +641,7 @@ func (sm *Miner) submitPoSt(start, end *types.BlockHeight, inputs []generatePost
 }
 
 // Query responds to a query for the proposal referenced by the given cid
-func (sm *Miner) Query(ctx context.Context, c cid.Cid) *deal.Response {
+func (sm *Miner) Query(c cid.Cid) *deal.Response {
 	sm.dealsLk.Lock()
 	defer sm.dealsLk.Unlock()
 	d, ok := sm.deals[c]
@@ -664,8 +664,7 @@ func (sm *Miner) handleQueryDeal(s inet.Stream) {
 		return
 	}
 
-	ctx := context.Background()
-	resp := sm.Query(ctx, q.Cid)
+	resp := sm.Query(q.Cid)
 
 	if err := cbu.NewMsgWriter(s).WriteMsg(resp); err != nil {
 		log.Errorf("failed to write query response: %s", err)
@@ -688,23 +687,15 @@ func getFileSize(ctx context.Context, c cid.Cid, dserv ipld.DAGService) (uint64,
 }
 
 func (sm *Miner) loadDeals() error {
-	res, err := sm.dealsDs.Query(query.Query{
-		Prefix: "/" + deal.ClientDatastorePrefix,
-	})
-	if err != nil {
-		return errors.Wrap(err, "failed to query deals from datastore")
-	}
-
 	sm.deals = make(map[cid.Cid]*deal.Deal)
 
-	for entry := range res.Next() {
-		var storageDeal deal.Deal
-		if err := cbor.DecodeInto(entry.Value, &storageDeal); err != nil {
-			return errors.Wrap(err, "failed to unmarshal deals from datastore")
-		}
-		sm.deals[storageDeal.Response.ProposalCid] = &storageDeal
+	deals, doneOrError := sm.porcelainAPI.DealsLs()
+	select {
+	case storageDeal := <-deals:
+		sm.deals[storageDeal.Response.ProposalCid] = storageDeal
+	case errOrNil := <-doneOrError:
+		return errOrNil
 	}
-
 	return nil
 }
 
