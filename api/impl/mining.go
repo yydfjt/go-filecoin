@@ -2,7 +2,9 @@ package impl
 
 import (
 	"context"
+
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
+	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/mining"
 	"github.com/filecoin-project/go-filecoin/node"
@@ -22,10 +24,6 @@ func (api *nodeMining) Once(ctx context.Context) (*types.Block, error) {
 	nd := api.api.node
 	ts := nd.ChainReader.Head()
 
-	miningAddr, err := nd.MiningAddress()
-	if err != nil {
-		return nil, err
-	}
 	blockTime, mineDelay := nd.MiningTimes()
 
 	getStateByKey := func(ctx context.Context, tsKey string) (state.Tree, error) {
@@ -54,8 +52,21 @@ func (api *nodeMining) Once(ctx context.Context) (*types.Block, error) {
 		return nd.Consensus.Weight(ctx, ts, pSt)
 	}
 
+	miningAddrIf, err := nd.PorcelainAPI.ConfigGet("mining.minerAddress")
+	if err != nil {
+		return nil, err
+	}
+	miningAddr := miningAddrIf.(address.Address)
+
+	blockSignerAddrIf, err := nd.PorcelainAPI.ConfigGet("mining.blockSignerAddress")
+	if err != nil {
+		return nil, err
+	}
+	blockSignerAddr := blockSignerAddrIf.(address.Address)
+
 	worker := mining.NewDefaultWorker(nd.MsgPool, getState, getWeight, consensus.NewDefaultProcessor(),
-		nd.PowerTable, nd.Blockstore, nd.CborStore(), miningAddr, nd.MiningSignerAddress(), nd.Wallet, blockTime)
+		nd.PowerTable, nd.Blockstore, nd.CborStore(), miningAddr, blockSignerAddr, nd.Wallet,
+		blockTime)
 
 	res, err := mining.MineOnce(ctx, worker, mineDelay, ts)
 	if err != nil {
