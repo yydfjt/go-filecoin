@@ -150,7 +150,7 @@ func requireSetTestChain(require *require.Assertions, con consensus.Protocol, mo
 }
 
 // loadSyncerFromRepo creates a store and syncer from an existing repo.
-func loadSyncerFromRepo(require *require.Assertions, r repo.Repo) (Syncer, *hamt.CborIpldStore) {
+func loadSyncerFromRepo(require *require.Assertions, r repo.Repo) (*DefaultSyncer, *hamt.CborIpldStore) {
 	powerTable := &testhelpers.TestView{}
 	bs := bstore.NewBlockstore(r.Datastore())
 	cst := hamt.NewCborStore()
@@ -165,7 +165,7 @@ func loadSyncerFromRepo(require *require.Assertions, r repo.Repo) (Syncer, *hamt
 
 // initSyncTestDefault creates and returns the datastructures (chain store, syncer, etc)
 // needed to run tests.  It also sets the global test variables appropriately.
-func initSyncTestDefault(require *require.Assertions) (Syncer, Store, *hamt.CborIpldStore, repo.Repo) {
+func initSyncTestDefault(require *require.Assertions) (*DefaultSyncer, Store, *hamt.CborIpldStore, repo.Repo) {
 	processor := testhelpers.NewTestProcessor()
 	powerTable := &testhelpers.TestView{}
 	r := repo.NewInMemoryRepo()
@@ -179,7 +179,7 @@ func initSyncTestDefault(require *require.Assertions) (Syncer, Store, *hamt.Cbor
 
 // initSyncTestWithPowerTable creates and returns the datastructures (chain store, syncer, etc)
 // needed to run tests.  It also sets the global test variables appropriately.
-func initSyncTestWithPowerTable(require *require.Assertions, powerTable consensus.PowerTableView) (Syncer, Store, *hamt.CborIpldStore, consensus.Protocol) {
+func initSyncTestWithPowerTable(require *require.Assertions, powerTable consensus.PowerTableView) (*DefaultSyncer, Store, *hamt.CborIpldStore, consensus.Protocol) {
 	processor := testhelpers.NewTestProcessor()
 	r := repo.NewInMemoryRepo()
 	bs := bstore.NewBlockstore(r.Datastore())
@@ -191,7 +191,7 @@ func initSyncTestWithPowerTable(require *require.Assertions, powerTable consensu
 	return sync, chain, cst, con
 }
 
-func initSyncTest(require *require.Assertions, con consensus.Protocol, genFunc func(cst *hamt.CborIpldStore, bs bstore.Blockstore) (*types.Block, error), cst *hamt.CborIpldStore, bs bstore.Blockstore, r repo.Repo) (Syncer, Store, *hamt.CborIpldStore, repo.Repo) {
+func initSyncTest(require *require.Assertions, con consensus.Protocol, genFunc func(cst *hamt.CborIpldStore, bs bstore.Blockstore) (*types.Block, error), cst *hamt.CborIpldStore, bs bstore.Blockstore, r repo.Repo) (*DefaultSyncer, Store, *hamt.CborIpldStore, repo.Repo) {
 	ctx := context.Background()
 
 	// chain.Store
@@ -902,4 +902,26 @@ func TestTipSetWeightDeep(t *testing.T) {
 	require.NoError(err)
 	expectedWeight = startingWeight + uint64(119000)
 	assert.Equal(expectedWeight, measuredWeight)
+}
+
+func TestIsReorg(t *testing.T) {
+	ctx := context.Background()
+	t.Run("if chain is a fork of another chain, IsReorg is true", func(t *testing.T) {
+		require := require.New(t)
+		syncer, chainStore, cst, _ := initSyncTestDefault(require)
+		requireGrowChain(ctx, require, cst, chainStore, 100)
+		block := RequireMkFakeChild(require, FakeChildParams{Parent: genTS, GenesisCid: genCid, StateRoot: genStateRoot, Nonce: 12882})
+		requirePutBlocks(require, cst, block)
+		link := testhelpers.RequireNewTipSet(require, block)
+		RequirePutTsas(ctx, require, chainStore, &TipSetAndState{TipSetStateRoot: genStateRoot, TipSet: link})
+		err := chainStore.SetHead(ctx, link)
+		require.NoError(err)
+		requireGrowChain(ctx, require, cst, chainStore, 100)
+		syncer.isReorg([]types.TipSet{})
+	})
+	// test that if chain is a fork of another chain, is reorg is true
+
+	// test that if chain is an subchain of another, is reorg is false
+
+	// test that if chain has head that is a subset of new chain head, is reorg is false
 }

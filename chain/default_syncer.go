@@ -66,7 +66,7 @@ type DefaultSyncer struct {
 var _ Syncer = (*DefaultSyncer)(nil)
 
 // NewDefaultSyncer constructs a DefaultSyncer ready for use.
-func NewDefaultSyncer(online, offline *hamt.CborIpldStore, c consensus.Protocol, s Store) Syncer {
+func NewDefaultSyncer(online, offline *hamt.CborIpldStore, c consensus.Protocol, s Store) *DefaultSyncer {
 	return &DefaultSyncer{
 		cstOnline:  online,
 		cstOffline: offline,
