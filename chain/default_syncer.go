@@ -255,6 +255,9 @@ func (syncer *DefaultSyncer) syncOne(ctx context.Context, parent, next types.Tip
 	}
 
 	if heavier {
+		if syncer.isReorg(ancestors, next) {
+			logSyncer.Warningf("reorg occurring from %s to %s", syncer.chainStore.Head().String(), next.String())
+		}
 		if err = syncer.chainStore.SetHead(ctx, next); err != nil {
 			return err
 		}
@@ -366,4 +369,18 @@ func (syncer *DefaultSyncer) HandleNewBlocks(ctx context.Context, blkCids []cid.
 		parent = ts
 	}
 	return nil
+}
+
+func (syncer *DefaultSyncer) isReorg(ancestors []types.TipSet, next types.TipSet) bool {
+	head := syncer.chainStore.Head()
+	headSortedSet := head.ToSortedCidSet()
+	if next.ToSortedCidSet().Contains(&headSortedSet) {
+		return false
+	}
+	for _, ancestor := range ancestors {
+		if ancestor.Equals(head) {
+			return false
+		}
+	}
+	return true
 }
