@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
+	"gx/ipfs/QmVRxA4J3UPQpw74dLrQ6NJkfysCA1H4GU28gVpXQt9zMU/go-libp2p-pubsub"
 	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
 	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/exec"
 	"github.com/filecoin-project/go-filecoin/plumbing/cfg"
 	"github.com/filecoin-project/go-filecoin/plumbing/chn"
+	"github.com/filecoin-project/go-filecoin/plumbing/mpool"
 	"github.com/filecoin-project/go-filecoin/plumbing/msg"
 	"github.com/filecoin-project/go-filecoin/plumbing/mthdsig"
 	"github.com/filecoin-project/go-filecoin/plumbing/ntwk"
@@ -29,7 +31,7 @@ type API struct {
 
 	chain        *chn.Reader
 	config       *cfg.Config
-	messagePool  *core.MessagePool
+	mpool        *mpool.Pool
 	msgPreviewer *msg.Previewer
 	msgQueryer   *msg.Queryer
 	msgSender    *msg.Sender
@@ -49,6 +51,7 @@ type APIDeps struct {
 	MsgSender    *msg.Sender
 	MsgWaiter    *msg.Waiter
 	Network      *ntwk.Network
+	Pubsub       *pubsub.PubSub
 	SigGetter    *mthdsig.Getter
 	Wallet       *wallet.Wallet
 }
@@ -60,7 +63,7 @@ func New(deps *APIDeps) *API {
 
 		chain:        deps.Chain,
 		config:       deps.Config,
-		messagePool:  deps.MessagePool,
+		mpool:        mpool.New(deps.MessagePool, deps.Pubsub),
 		msgPreviewer: deps.MsgPreviewer,
 		msgQueryer:   deps.MsgQueryer,
 		msgSender:    deps.MsgSender,
@@ -109,9 +112,14 @@ func (api *API) BlockGet(ctx context.Context, id cid.Cid) (*types.Block, error) 
 	return api.chain.BlockGet(ctx, id)
 }
 
+// MessagePoolPending lists messages un-mined in the pool
+func (api *API) MessagePoolPending(ctx context.Context, messageCount uint) ([]*types.SignedMessage, error) {
+	return api.mpool.Pending(ctx, messageCount)
+}
+
 // MessagePoolRemove removes a message from the message pool
 func (api *API) MessagePoolRemove(cid cid.Cid) {
-	api.messagePool.Remove(cid)
+	api.mpool.Remove(cid)
 }
 
 // MessagePreview previews the Gas cost of a message by running it locally on the client and
