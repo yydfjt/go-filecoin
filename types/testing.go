@@ -1,24 +1,25 @@
 package types
 
 import (
-	"crypto/ecdsa"
+	"bytes"
 	"fmt"
+	"testing"
 
+	"github.com/ipfs/go-cid"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/minio/blake2b-simd"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/crypto"
-	cu "github.com/filecoin-project/go-filecoin/crypto/util"
 	wutil "github.com/filecoin-project/go-filecoin/wallet/util"
 )
 
 // NewTestPoSt creates a trivial, right-sized byte slice for a Proof of Spacetime.
-func NewTestPoSt() [192]byte {
-	var newProof [192]byte
-	return newProof
+func NewTestPoSt() []byte {
+	return make([]byte, OnePoStProofPartition.ProofLen())
 }
 
 // MockRecoverer implements the Recoverer interface
@@ -36,6 +37,7 @@ func (mr *MockRecoverer) Ecrecover(data []byte, sig Signature) ([]byte, error) {
 type MockSigner struct {
 	AddrKeyInfo map[address.Address]KeyInfo
 	Addresses   []address.Address
+	PubKeys     [][]byte
 }
 
 // NewMockSigner returns a new mock signer, capable of signing data with
@@ -44,23 +46,46 @@ func NewMockSigner(kis []KeyInfo) MockSigner {
 	var ms MockSigner
 	ms.AddrKeyInfo = make(map[address.Address]KeyInfo)
 	for _, k := range kis {
-		// get the secret key
-		sk, err := crypto.BytesToECDSA(k.PrivateKey)
+		// extract public key
+		pub := k.PublicKey()
+		newAddr, err := address.NewSecp256k1Address(pub)
 		if err != nil {
 			panic(err)
 		}
-		// extract public key
-		pub, ok := sk.Public().(*ecdsa.PublicKey)
-		if !ok {
-			panic("unknown public key type")
-		}
-		addrHash := address.Hash(cu.SerializeUncompressed(pub))
-		newAddr := address.NewMainnet(addrHash)
 		ms.Addresses = append(ms.Addresses, newAddr)
 		ms.AddrKeyInfo[newAddr] = k
-
+		ms.PubKeys = append(ms.PubKeys, pub)
 	}
 	return ms
+}
+
+// NewMockSignersAndKeyInfo is a convenience function to generate a mock
+// signers with some keys.
+func NewMockSignersAndKeyInfo(numSigners int) (MockSigner, []KeyInfo) {
+	ki := MustGenerateKeyInfo(numSigners, 42)
+	signer := NewMockSigner(ki)
+	return signer, ki
+}
+
+// MustGenerateKeyInfo generates `n` distinct keyinfos using seed `seed`.
+// The result is deterministic (for stable tests), don't use this for real keys!
+func MustGenerateKeyInfo(n int, seed byte) []KeyInfo {
+	token := bytes.Repeat([]byte{seed}, 512)
+	var keyinfos []KeyInfo
+	for i := 0; i < n; i++ {
+		token[0] = byte(i)
+		prv, err := crypto.GenerateKeyFromSeed(bytes.NewReader(token))
+		if err != nil {
+			panic(err)
+		}
+
+		ki := &KeyInfo{
+			PrivateKey: prv,
+			Curve:      SECP256K1,
+		}
+		keyinfos = append(keyinfos, *ki)
+	}
+	return keyinfos
 }
 
 // SignBytes cryptographically signs `data` using the Address `addr`.
@@ -70,12 +95,46 @@ func (ms MockSigner) SignBytes(data []byte, addr address.Address) (Signature, er
 		panic("unknown address")
 	}
 
-	sk, err := crypto.BytesToECDSA(ki.PrivateKey)
+	hash := blake2b.Sum256(data)
+	return crypto.Sign(ki.Key(), hash[:])
+}
+
+// GetAddressForPubKey looks up a KeyInfo address associated with a given PublicKey for a MockSigner
+func (ms MockSigner) GetAddressForPubKey(pk []byte) (address.Address, error) {
+	var addr address.Address
+
+	for _, ki := range ms.AddrKeyInfo {
+		testPk := ki.PublicKey()
+
+		if bytes.Equal(testPk, pk) {
+			addr, err := ki.Address()
+			if err != nil {
+				return addr, errors.New("could not fetch address")
+			}
+			return addr, nil
+		}
+	}
+	return addr, errors.New("public key not found in wallet")
+}
+
+// CreateTicket is effectively a duplicate of Wallet CreateTicket for testing purposes.
+func (ms MockSigner) CreateTicket(proof PoStProof, signerPubKey []byte) (Signature, error) {
+	var ticket Signature
+
+	signerAddr, err := ms.GetAddressForPubKey(signerPubKey)
 	if err != nil {
-		return Signature{}, err
+		return ticket, err
 	}
 
-	return wutil.Sign(sk, data)
+	buf := append(proof[:], signerAddr.Bytes()...)
+	h := blake2b.Sum256(buf)
+
+	ticket, err = ms.SignBytes(h[:], signerAddr)
+	if err != nil {
+		errMsg := fmt.Sprintf("SignBytes error in CreateTicket: %s", err.Error())
+		panic(errMsg)
+	}
+	return ticket, nil
 }
 
 // NewSignedMessageForTestGetter returns a closure that returns a SignedMessage unique to that invocation.
@@ -89,11 +148,15 @@ func NewSignedMessageForTestGetter(ms MockSigner) func() *SignedMessage {
 	return func() *SignedMessage {
 		s := fmt.Sprintf("smsg%d", i)
 		i++
+		newAddr, err := address.NewActorAddress([]byte(s + "-to"))
+		if err != nil {
+			panic(err)
+		}
 		msg := NewMessage(
 			ms.Addresses[0], // from needs to be an address from the signer
-			address.NewMainnet([]byte(s+"-to")),
+			newAddr,
 			0,
-			NewAttoFILFromFIL(0),
+			ZeroAttoFIL,
 			s,
 			[]byte("params"))
 		smsg, err := NewSignedMessage(*msg, &ms, NewGasPrice(0), NewGasUnits(0))
@@ -109,19 +172,25 @@ func NewSignedMessageForTestGetter(ms MockSigner) func() *SignedMessage {
 // SomeCid generates a Cid for use in tests where you want a Cid but don't care
 // what it is.
 func SomeCid() cid.Cid {
-	b := &Block{}
-	return b.Cid()
+	obj, err := cbor.WrapObject([]int{42}, DefaultHashFunction, -1)
+	if err != nil {
+		panic(err)
+	}
+	return obj.Cid()
 }
 
 // NewCidForTestGetter returns a closure that returns a Cid unique to that invocation.
 // The Cid is unique wrt the closure returned, not globally. You can use this function
 // in tests.
 func NewCidForTestGetter() func() cid.Cid {
-	i := Uint64(31337)
+	i := 31337
 	return func() cid.Cid {
-		b := &Block{Height: i}
+		obj, err := cbor.WrapObject([]int{i}, DefaultHashFunction, -1)
+		if err != nil {
+			panic(err)
+		}
 		i++
-		return b.Cid()
+		return obj.Cid()
 	}
 }
 
@@ -135,40 +204,29 @@ func NewMessageForTestGetter() func() *Message {
 	return func() *Message {
 		s := fmt.Sprintf("msg%d", i)
 		i++
+		from, err := address.NewActorAddress([]byte(s + "-from"))
+		if err != nil {
+			panic(err)
+		}
+		to, err := address.NewActorAddress([]byte(s + "-to"))
+		if err != nil {
+			panic(err)
+		}
 		return NewMessage(
-			address.NewMainnet([]byte(s+"-from")),
-			address.NewMainnet([]byte(s+"-to")),
+			from,
+			to,
 			0,
-			nil,
+			ZeroAttoFIL,
 			s,
 			nil)
 	}
 }
 
-// NewBlockForTest returns a new block. If a parent block is provided, the returned
-// block will be configured as if it were a child of that parent. The returned block
-// has not been persisted into the store.
-func NewBlockForTest(parent *Block, nonce uint64) *Block {
-	block := &Block{
-		Nonce:           Uint64(nonce),
-		Messages:        []*SignedMessage{},
-		MessageReceipts: []*MessageReceipt{},
-	}
-
-	if parent != nil {
-		block.Height = parent.Height + 1
-		block.StateRoot = parent.StateRoot
-		block.Parents.Add(parent.Cid())
-	}
-
-	return block
-}
-
 // RequireNewTipSet instantiates and returns a new tipset of the given blocks
 // and requires that the setup validation succeed.
-func RequireNewTipSet(require *require.Assertions, blks ...*Block) TipSet {
+func RequireNewTipSet(t *testing.T, blks ...*Block) TipSet {
 	ts, err := NewTipSet(blks...)
-	require.NoError(err)
+	require.NoError(t, err)
 	return ts
 }
 
@@ -180,6 +238,7 @@ func NewMsgs(n int) []*Message {
 	msgs := make([]*Message, n)
 	for i := 0; i < n; i++ {
 		msgs[i] = newMsg()
+		msgs[i].Nonce = Uint64(i)
 	}
 	return msgs
 }
@@ -187,11 +246,18 @@ func NewMsgs(n int) []*Message {
 // NewSignedMsgs returns n signed messages. The messages returned are unique to this invocation
 // but are not unique globally (ie, a second call to NewSignedMsgs will return the same
 // set of messages).
-func NewSignedMsgs(n int, ms MockSigner) []*SignedMessage {
-	newSmsg := NewSignedMessageForTestGetter(ms)
+func NewSignedMsgs(n uint, ms MockSigner) []*SignedMessage {
+	var err error
+	newMsg := NewMessageForTestGetter()
 	smsgs := make([]*SignedMessage, n)
-	for i := 0; i < n; i++ {
-		smsgs[i] = newSmsg()
+	for i := uint(0); i < n; i++ {
+		msg := newMsg()
+		msg.From = ms.Addresses[0]
+		msg.Nonce = Uint64(i)
+		smsgs[i], err = NewSignedMessage(*msg, ms, NewGasPrice(1), NewGasUnits(0))
+		if err != nil {
+			panic(err)
+		}
 	}
 	return smsgs
 }
@@ -260,15 +326,15 @@ type HasCid interface {
 }
 
 // AssertHaveSameCid asserts that two values have identical CIDs.
-func AssertHaveSameCid(a *assert.Assertions, m HasCid, n HasCid) {
+func AssertHaveSameCid(t *testing.T, m HasCid, n HasCid) {
 	if !m.Cid().Equals(n.Cid()) {
-		a.Fail("CIDs don't match", "not equal %v %v", m.Cid(), n.Cid())
+		assert.Fail(t, "CIDs don't match", "not equal %v %v", m.Cid(), n.Cid())
 	}
 }
 
 // AssertCidsEqual asserts that two CIDS are identical.
-func AssertCidsEqual(a *assert.Assertions, m cid.Cid, n cid.Cid) {
+func AssertCidsEqual(t *testing.T, m cid.Cid, n cid.Cid) {
 	if !m.Equals(n) {
-		a.Fail("CIDs don't match", "not equal %v %v", m, n)
+		assert.Fail(t, "CIDs don't match", "not equal %v %v", m, n)
 	}
 }

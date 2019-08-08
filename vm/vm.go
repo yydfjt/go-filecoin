@@ -5,7 +5,7 @@ package vm
 
 import (
 	"context"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
+	cbor "github.com/ipfs/go-ipld-cbor"
 
 	"github.com/filecoin-project/go-filecoin/actor"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -18,17 +18,16 @@ func Send(ctx context.Context, vmCtx *Context) ([][]byte, uint8, error) {
 	deps := sendDeps{
 		transfer: Transfer,
 	}
-
 	return send(ctx, deps, vmCtx)
 }
 
 type sendDeps struct {
-	transfer func(*actor.Actor, *actor.Actor, *types.AttoFIL) error
+	transfer func(*actor.Actor, *actor.Actor, types.AttoFIL) error
 }
 
 // send executes a message pass inside the VM. It exists alongside Send so that we can inject its dependencies during test.
 func send(ctx context.Context, deps sendDeps, vmCtx *Context) ([][]byte, uint8, error) {
-	if vmCtx.message.Value != nil {
+	if !vmCtx.message.Value.Equal(types.ZeroAttoFIL) {
 		if err := deps.transfer(vmCtx.from, vmCtx.to, vmCtx.message.Value); err != nil {
 			if errors.ShouldRevert(err) {
 				return nil, err.(*errors.RevertError).Code(), err
@@ -65,7 +64,7 @@ func send(ctx context.Context, deps sendDeps, vmCtx *Context) ([][]byte, uint8, 
 }
 
 // Transfer transfers the given value between two actors.
-func Transfer(fromActor, toActor *actor.Actor, value *types.AttoFIL) error {
+func Transfer(fromActor, toActor *actor.Actor, value types.AttoFIL) error {
 	if value.IsNegative() {
 		return errors.Errors[errors.ErrCannotTransferNegativeValue]
 	}
@@ -74,9 +73,6 @@ func Transfer(fromActor, toActor *actor.Actor, value *types.AttoFIL) error {
 		return errors.Errors[errors.ErrInsufficientBalance]
 	}
 
-	if toActor.Balance == nil {
-		toActor.Balance = types.NewZeroAttoFIL()
-	}
 	fromActor.Balance = fromActor.Balance.Sub(value)
 	toActor.Balance = toActor.Balance.Add(value)
 

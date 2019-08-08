@@ -7,10 +7,10 @@ import (
 	"io"
 
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/protocol/storage"
+	"github.com/filecoin-project/go-filecoin/protocol/storage/storagedeal"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmXWZCd8jfaHmt4UDSnjKmGcrQMw95bDGWqEeVLVJjoANX/go-ipfs-files"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-ipfs-files"
 )
 
 // ClientCat runs the client cat command against the filecoin process.
@@ -36,23 +36,28 @@ func (f *Filecoin) ClientImport(ctx context.Context, data files.File) (cid.Cid, 
 
 // ClientProposeStorageDeal runs the client propose-storage-deal command against the filecoin process.
 func (f *Filecoin) ClientProposeStorageDeal(ctx context.Context, data cid.Cid,
-	miner address.Address, ask uint64, duration uint64, allowDuplicates bool) (*storage.DealResponse, error) {
+	miner address.Address, ask uint64, duration uint64, options ...ActionOption) (*storagedeal.Response, error) {
 
-	var out storage.DealResponse
+	var out storagedeal.Response
 	sData := data.String()
 	sMiner := miner.String()
 	sAsk := fmt.Sprintf("%d", ask)
 	sDuration := fmt.Sprintf("%d", duration)
 
-	if err := f.RunCmdJSONWithStdin(ctx, nil, &out, "go-filecoin", "client", "propose-storage-deal", sMiner, sData, sAsk, sDuration); err != nil {
+	args := []string{"go-filecoin", "client", "propose-storage-deal", sMiner, sData, sAsk, sDuration}
+	for _, opt := range options {
+		args = append(args, opt()...)
+	}
+
+	if err := f.RunCmdJSONWithStdin(ctx, nil, &out, args...); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
 // ClientQueryStorageDeal runs the client query-storage-deal command against the filecoin process.
-func (f *Filecoin) ClientQueryStorageDeal(ctx context.Context, prop cid.Cid) (*storage.DealResponse, error) {
-	var out storage.DealResponse
+func (f *Filecoin) ClientQueryStorageDeal(ctx context.Context, prop cid.Cid) (*storagedeal.Response, error) {
+	var out storagedeal.Response
 
 	if err := f.RunCmdJSONWithStdin(ctx, nil, &out, "go-filecoin", "client", "query-storage-deal", prop.String()); err != nil {
 		return nil, err

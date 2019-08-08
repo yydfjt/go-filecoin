@@ -1,7 +1,10 @@
-[submodule "proofs/rust-proofs"]
-	path = proofs/rust-proofs
-	url = https://github.com/filecoin-project/rust-proofs.git
-	branch = master
 [submodule "bls-signatures/bls-signatures"]
 	path = bls-signatures/bls-signatures
 	url = https://github.com/filecoin-project/bls-signatures.git
+[submodule "proofs/rust-fil-proofs"]
+	path = proofs/rust-fil-proofs
+	url = https://github.com/filecoin-project/rust-fil-proofs.git
+[submodule "proofs/rust-fil-sector-builder"]
+	path = proofs/rust-fil-sector-builder
+	url = https://github.com/filecoin-project/rust-fil-sector-builder.git
+	branch = master

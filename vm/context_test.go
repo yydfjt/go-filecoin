@@ -2,15 +2,14 @@ package vm
 
 import (
 	"context"
-	"strconv"
 	"testing"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
-	"gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
-	xerrors "gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-datastore"
+	"github.com/ipfs/go-hamt-ipld"
+	"github.com/ipfs/go-ipfs-blockstore"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	xerrors "github.com/pkg/errors"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,12 +20,14 @@ import (
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/exec"
 	"github.com/filecoin-project/go-filecoin/state"
+	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm/errors"
 )
 
 func TestVMContextStorage(t *testing.T) {
-	assert := assert.New(t)
+	tf.UnitTest(t)
+
 	addrGetter := address.NewForTestGetter()
 	ctx := context.Background()
 
@@ -37,15 +38,15 @@ func TestVMContextStorage(t *testing.T) {
 	bs := blockstore.NewBlockstore(datastore.NewMapDatastore())
 	vms := NewStorageMap(bs)
 
-	toActor, err := account.NewActor(nil)
-	assert.NoError(err)
+	toActor, err := account.NewActor(types.ZeroAttoFIL)
+	assert.NoError(t, err)
 	toAddr := addrGetter()
 
-	assert.NoError(st.SetActor(ctx, toAddr, toActor))
-	msg := types.NewMessage(addrGetter(), toAddr, 0, nil, "hello", nil)
+	assert.NoError(t, st.SetActor(ctx, toAddr, toActor))
+	msg := types.NewMessage(addrGetter(), toAddr, 0, types.ZeroAttoFIL, "hello", nil)
 
 	to, err := cstate.GetActor(ctx, toAddr)
-	assert.NoError(err)
+	assert.NoError(t, err)
 	vmCtxParams := NewContextParams{
 		From:        nil,
 		To:          to,
@@ -58,21 +59,26 @@ func TestVMContextStorage(t *testing.T) {
 	vmCtx := NewVMContext(vmCtxParams)
 
 	node, err := cbor.WrapObject([]byte("hello"), types.DefaultHashFunction, -1)
-	assert.NoError(err)
+	assert.NoError(t, err)
 
-	assert.NoError(vmCtx.WriteStorage(node.RawData()))
-	assert.NoError(cstate.Commit(ctx))
+	cid, err := vmCtx.Storage().Put(node.RawData())
+	require.NoError(t, err)
+	err = vmCtx.Storage().Commit(cid, vmCtx.Storage().Head())
+	require.NoError(t, err)
+	assert.NoError(t, cstate.Commit(ctx))
 
 	// make sure we can read it back
 	toActorBack, err := st.GetActor(ctx, toAddr)
-	assert.NoError(err)
+	assert.NoError(t, err)
 	vmCtxParams.To = toActorBack
-	storage, err := NewVMContext(vmCtxParams).ReadStorage()
-	assert.NoError(err)
-	assert.Equal(storage, node.RawData())
+	storage, err := vmCtx.Storage().Get(vmCtx.Storage().Head())
+	assert.NoError(t, err)
+	assert.Equal(t, storage, node.RawData())
 }
 
 func TestVMContextSendFailures(t *testing.T) {
+	tf.UnitTest(t)
+
 	actor1 := actor.NewActor(cid.Undef, types.NewAttoFILFromFIL(100))
 	actor2 := actor.NewActor(cid.Undef, types.NewAttoFILFromFIL(50))
 	newMsg := types.NewMessageForTestGetter()
@@ -98,8 +104,6 @@ func TestVMContextSendFailures(t *testing.T) {
 	}
 
 	t.Run("failure to convert to ABI values results in fault error", func(t *testing.T) {
-		assert := assert.New(t)
-
 		var calls []string
 		deps := &deps{
 			ToValues: func(_ []interface{}) ([]*abi.Value, error) {
@@ -111,17 +115,15 @@ func TestVMContextSendFailures(t *testing.T) {
 		ctx := NewVMContext(vmCtxParams)
 		ctx.deps = deps
 
-		_, code, err := ctx.Send(newAddress(), "foo", nil, []interface{}{})
+		_, code, err := ctx.Send(newAddress(), "foo", types.ZeroAttoFIL, []interface{}{})
 
-		assert.Error(err)
-		assert.Equal(1, int(code))
-		assert.True(errors.IsFault(err))
-		assert.Equal([]string{"ToValues"}, calls)
+		assert.Error(t, err)
+		assert.Equal(t, 1, int(code))
+		assert.True(t, errors.IsFault(err))
+		assert.Equal(t, []string{"ToValues"}, calls)
 	})
 
 	t.Run("failure to encode ABI values to byte slice results in revert error", func(t *testing.T) {
-		assert := assert.New(t)
-
 		var calls []string
 		deps := &deps{
 			EncodeValues: func(_ []*abi.Value) ([]byte, error) {
@@ -137,17 +139,15 @@ func TestVMContextSendFailures(t *testing.T) {
 		ctx := NewVMContext(vmCtxParams)
 		ctx.deps = deps
 
-		_, code, err := ctx.Send(newAddress(), "foo", nil, []interface{}{})
+		_, code, err := ctx.Send(newAddress(), "foo", types.ZeroAttoFIL, []interface{}{})
 
-		assert.Error(err)
-		assert.Equal(1, int(code))
-		assert.True(errors.ShouldRevert(err))
-		assert.Equal([]string{"ToValues", "EncodeValues"}, calls)
+		assert.Error(t, err)
+		assert.Equal(t, 1, int(code))
+		assert.True(t, errors.ShouldRevert(err))
+		assert.Equal(t, []string{"ToValues", "EncodeValues"}, calls)
 	})
 
 	t.Run("refuse to send a message with identical from/to", func(t *testing.T) {
-		assert := assert.New(t)
-
 		to := newAddress()
 
 		msg := newMsg()
@@ -168,17 +168,15 @@ func TestVMContextSendFailures(t *testing.T) {
 		ctx := NewVMContext(vmCtxParams)
 		ctx.deps = deps
 
-		_, code, err := ctx.Send(to, "foo", nil, []interface{}{})
+		_, code, err := ctx.Send(to, "foo", types.ZeroAttoFIL, []interface{}{})
 
-		assert.Error(err)
-		assert.Equal(1, int(code))
-		assert.True(errors.IsFault(err))
-		assert.Equal([]string{"ToValues", "EncodeValues"}, calls)
+		assert.Error(t, err)
+		assert.Equal(t, 1, int(code))
+		assert.True(t, errors.IsFault(err))
+		assert.Equal(t, []string{"ToValues", "EncodeValues"}, calls)
 	})
 
 	t.Run("returns a fault error if unable to create or find a recipient actor", func(t *testing.T) {
-		assert := assert.New(t)
-
 		var calls []string
 		deps := &deps{
 			EncodeValues: func(_ []*abi.Value) ([]byte, error) {
@@ -200,17 +198,15 @@ func TestVMContextSendFailures(t *testing.T) {
 		ctx := NewVMContext(vmCtxParams)
 		ctx.deps = deps
 
-		_, code, err := ctx.Send(newAddress(), "foo", nil, []interface{}{})
+		_, code, err := ctx.Send(newAddress(), "foo", types.ZeroAttoFIL, []interface{}{})
 
-		assert.Error(err)
-		assert.Equal(1, int(code))
-		assert.True(errors.IsFault(err))
-		assert.Equal([]string{"ToValues", "EncodeValues", "GetOrCreateActor"}, calls)
+		assert.Error(t, err)
+		assert.Equal(t, 1, int(code))
+		assert.True(t, errors.IsFault(err))
+		assert.Equal(t, []string{"ToValues", "EncodeValues", "GetOrCreateActor"}, calls)
 	})
 
 	t.Run("propagates any error returned from Send", func(t *testing.T) {
-		assert := assert.New(t)
-
 		expectedVMSendErr := xerrors.New("error")
 
 		var calls []string
@@ -236,50 +232,46 @@ func TestVMContextSendFailures(t *testing.T) {
 		ctx := NewVMContext(vmCtxParams)
 		ctx.deps = deps
 
-		_, code, err := ctx.Send(newAddress(), "foo", nil, []interface{}{})
+		_, code, err := ctx.Send(newAddress(), "foo", types.ZeroAttoFIL, []interface{}{})
 
-		assert.Error(err)
-		assert.Equal(123, int(code))
-		assert.Equal(expectedVMSendErr, err)
-		assert.Equal([]string{"ToValues", "EncodeValues", "GetOrCreateActor", "Send"}, calls)
+		assert.Error(t, err)
+		assert.Equal(t, 123, int(code))
+		assert.Equal(t, expectedVMSendErr, err)
+		assert.Equal(t, []string{"ToValues", "EncodeValues", "GetOrCreateActor", "Send"}, calls)
 	})
 
 	t.Run("creates new actor from cid", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		ctx := context.Background()
 		vmctx := NewVMContext(vmCtxParams)
 		addr, err := vmctx.AddressForNewActor()
 
-		require.NoError(err)
+		require.NoError(t, err)
 
 		params := &actor.FakeActorStorage{}
 		err = vmctx.CreateNewActor(addr, fakeActorCid, params)
-		require.NoError(err)
+		require.NoError(t, err)
 
 		act, err := tree.GetActor(ctx, addr)
-		require.NoError(err)
+		require.NoError(t, err)
 
-		assert.Equal(fakeActorCid, act.Code)
+		assert.Equal(t, fakeActorCid, act.Code)
 		actorStorage := vms.NewStorage(addr, act)
 		chunk, err := actorStorage.Get(act.Head)
-		require.NoError(err)
+		require.NoError(t, err)
 
-		assert.True(len(chunk) > 0)
+		assert.True(t, len(chunk) > 0)
 	})
 
 }
 
 func TestVMContextIsAccountActor(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
+	tf.UnitTest(t)
 
 	bs := blockstore.NewBlockstore(datastore.NewMapDatastore())
 	vms := NewStorageMap(bs)
 
 	accountActor, err := account.NewActor(types.NewAttoFILFromFIL(1000))
-	require.NoError(err)
+	require.NoError(t, err)
 	vmCtxParams := NewContextParams{
 		From:       accountActor,
 		StorageMap: vms,
@@ -287,89 +279,10 @@ func TestVMContextIsAccountActor(t *testing.T) {
 	}
 
 	ctx := NewVMContext(vmCtxParams)
-	assert.True(ctx.IsFromAccountActor())
+	assert.True(t, ctx.IsFromAccountActor())
 
 	nonAccountActor := actor.NewActor(types.NewCidForTestGetter()(), types.NewAttoFILFromFIL(1000))
 	vmCtxParams.From = nonAccountActor
 	ctx = NewVMContext(vmCtxParams)
-	assert.False(ctx.IsFromAccountActor())
-}
-
-func TestVMContextRand(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	var ancestors []types.TipSet
-	// setup ancestor chain
-	head := types.NewBlockForTest(nil, uint64(0))
-	head.Ticket = []byte(strconv.Itoa(0))
-	for i := 0; i < 20; i++ {
-		ancestors = append(ancestors, types.RequireNewTipSet(require, head))
-		newBlock := types.NewBlockForTest(head, uint64(0))
-		newBlock.Ticket = []byte(strconv.Itoa(i + 1))
-		head = newBlock
-	}
-	ancestors = append(ancestors, types.RequireNewTipSet(require, head))
-
-	t.Run("happy path", func(t *testing.T) {
-		vmCtxParams := NewContextParams{
-			Ancestors: ancestors,
-			LookBack:  3,
-		}
-		ctx := NewVMContext(vmCtxParams)
-
-		r, err := ctx.Rand(types.NewBlockHeight(uint64(20)))
-		assert.NoError(err)
-		assert.Equal([]byte(strconv.Itoa(17)), r)
-
-		r, err = ctx.Rand(types.NewBlockHeight(uint64(3)))
-		assert.NoError(err)
-		assert.Equal([]byte(strconv.Itoa(0)), r)
-
-		r, err = ctx.Rand(types.NewBlockHeight(uint64(10)))
-		assert.NoError(err)
-		assert.Equal([]byte(strconv.Itoa(7)), r)
-	})
-
-	t.Run("faults with height out of range", func(t *testing.T) {
-		// edit ancestors to include null blocks
-		baseBlock := ancestors[len(ancestors)-2].ToSlice()[0]
-		afterNull := types.NewBlockForTest(baseBlock, uint64(0))
-		afterNull.Height += types.Uint64(uint64(5))
-		afterNull.Ticket = []byte(strconv.Itoa(int(afterNull.Height)))
-		modAncestors := append(ancestors[:len(ancestors)-1], types.RequireNewTipSet(require, afterNull))
-		vmCtxParams := NewContextParams{
-			Ancestors: modAncestors,
-			LookBack:  3,
-		}
-
-		ctx := NewVMContext(vmCtxParams)
-		_, err := ctx.Rand(types.NewBlockHeight(uint64(22))) // null block here
-		assert.Error(err)
-
-		_, err = ctx.Rand(types.NewBlockHeight(uint64(30))) // ancestors all lower height
-		assert.Error(err)
-	})
-
-	t.Run("faults with lookback out of range", func(t *testing.T) {
-		modAncestors := ancestors[5:]
-		vmCtxParams := NewContextParams{
-			Ancestors: modAncestors,
-			LookBack:  3,
-		}
-
-		ctx := NewVMContext(vmCtxParams)
-		_, err := ctx.Rand(types.NewBlockHeight(uint64(5))) // lookback height lower than all ancestors
-		assert.Error(err)
-	})
-
-	t.Run("truncated to genesis", func(t *testing.T) {
-		vmCtxParams := NewContextParams{
-			Ancestors: ancestors,
-			LookBack:  3,
-		}
-		ctx := NewVMContext(vmCtxParams)
-		r, err := ctx.Rand(types.NewBlockHeight(uint64(1))) // lookback height lower than all ancestors
-		assert.NoError(err)
-		assert.Equal([]byte(strconv.Itoa(0)), r)
-	})
+	assert.False(t, ctx.IsFromAccountActor())
 }

@@ -4,12 +4,12 @@ import (
 	"context"
 	"reflect"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
-	block "gx/ipfs/QmWoXtvgC8inqFkAATB7cp2Dax7XBi9VDvSg9RCCZufmRk/go-block-format"
-	"gx/ipfs/QmfWqohMtbivn5NRJvtrLzCW3EU4QmoLvVNtmvo9vbdtVA/refmt/obj"
-	"gx/ipfs/QmfWqohMtbivn5NRJvtrLzCW3EU4QmoLvVNtmvo9vbdtVA/refmt/shared"
+	block "github.com/ipfs/go-block-format"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-hamt-ipld"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/polydawn/refmt/obj"
+	"github.com/polydawn/refmt/shared"
 
 	"github.com/filecoin-project/go-filecoin/exec"
 	vmerrors "github.com/filecoin-project/go-filecoin/vm/errors"
@@ -38,13 +38,8 @@ func UnmarshalStorage(raw []byte, to interface{}) error {
 // Note that if 'f' returns an error, modifications to the storage are not
 // saved.
 func WithState(ctx exec.VMContext, st interface{}, f func() (interface{}, error)) (interface{}, error) {
-	chunk, err := ctx.ReadStorage()
-	if err != nil {
-		return nil, vmerrors.FaultErrorWrap(err, "Could not read actor storage")
-	}
-
-	if err := UnmarshalStorage(chunk, st); err != nil {
-		return nil, vmerrors.FaultErrorWrap(err, "Could not unmarshall actor storage")
+	if err := ReadState(ctx, st); err != nil {
+		return nil, err
 	}
 
 	ret, err := f()
@@ -52,11 +47,35 @@ func WithState(ctx exec.VMContext, st interface{}, f func() (interface{}, error)
 		return nil, err
 	}
 
-	if err := ctx.WriteStorage(st); err != nil {
-		return nil, vmerrors.FaultErrorWrap(err, "Could not write actor storage")
+	stage := ctx.Storage()
+
+	cid, err := stage.Put(st)
+	if err != nil {
+		return nil, vmerrors.RevertErrorWrap(err, "Could not stage memory chunk")
+	}
+
+	err = stage.Commit(cid, stage.Head())
+	if err != nil {
+		return nil, vmerrors.RevertErrorWrap(err, "Could not commit actor memory")
 	}
 
 	return ret, nil
+}
+
+// ReadState is a helper method to read the cbor node at the actor's Head into the given struct
+func ReadState(ctx exec.VMContext, st interface{}) error {
+	storage := ctx.Storage()
+
+	memory, err := storage.Get(storage.Head())
+	if err != nil {
+		return vmerrors.FaultErrorWrap(err, "Could not read actor storage")
+	}
+
+	if err := UnmarshalStorage(memory, st); err != nil {
+		return vmerrors.FaultErrorWrap(err, "Could not unmarshall actor storage")
+	}
+
+	return nil
 }
 
 // SetKeyValue convenience method to load a lookup, set one key value pair and commit.
@@ -107,7 +126,7 @@ func LoadLookup(ctx context.Context, storage exec.Storage, cid cid.Cid) (exec.Lo
 	return LoadTypedLookup(ctx, storage, cid, nil)
 }
 
-// LoadTypedLookup loads hamt-ipld node from storage if the cid exists, or creates a new on if it is nil.
+// LoadTypedLookup loads hamt-ipld node from storage if the cid exists, or creates a new one if it is nil.
 // The provided type allows the lookup to correctly unmarshal values
 func LoadTypedLookup(ctx context.Context, storage exec.Storage, cid cid.Cid, valueType interface{}) (exec.Lookup, error) {
 	cborStore := &hamt.CborIpldStore{

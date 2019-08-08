@@ -3,31 +3,29 @@ package msg
 import (
 	"context"
 
-	hamt "gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	bstore "gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
+	"github.com/ipfs/go-hamt-ipld"
+	bstore "github.com/ipfs/go-ipfs-blockstore"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/abi"
-	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/chain"
 	"github.com/filecoin-project/go-filecoin/consensus"
-	"github.com/filecoin-project/go-filecoin/exec"
-	"github.com/filecoin-project/go-filecoin/plumbing/mthdsig"
-	"github.com/filecoin-project/go-filecoin/repo"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
-	"github.com/filecoin-project/go-filecoin/wallet"
 )
+
+// Abstracts over a store of blockchain state.
+type queryerChainReader interface {
+	GetHead() types.TipSetKey
+	GetTipSetState(context.Context, types.TipSetKey) (state.Tree, error)
+	GetTipSet(types.TipSetKey) (types.TipSet, error)
+}
 
 // Queryer knows how to send read-only messages for querying actor state.
 type Queryer struct {
-	// For getting the default address. Lame.
-	repo   repo.Repo
-	wallet *wallet.Wallet
 	// To get the head tipset state root.
-	chainReader chain.ReadStore
+	chainReader queryerChainReader
 	// To load the tree for the head tipset state root.
 	cst *hamt.CborIpldStore
 	// For vm storage.
@@ -35,46 +33,36 @@ type Queryer struct {
 }
 
 // NewQueryer constructs a Queryer.
-func NewQueryer(repo repo.Repo, wallet *wallet.Wallet, chainReader chain.ReadStore, cst *hamt.CborIpldStore, bs bstore.Blockstore) *Queryer {
-	return &Queryer{repo, wallet, chainReader, cst, bs}
+func NewQueryer(chainReader queryerChainReader, cst *hamt.CborIpldStore, bs bstore.Blockstore) *Queryer {
+	return &Queryer{chainReader, cst, bs}
 }
 
 // Query sends a read-only message to an actor.
-func (q *Queryer) Query(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, *exec.FunctionSignature, error) {
+func (q *Queryer) Query(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error) {
 	encodedParams, err := abi.ToEncodedValues(params...)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "couldnt encode message params")
+		return nil, errors.Wrap(err, "failed to encode message params")
 	}
 
-	// We return the method signature so callers know how to decode the return value.
-	// Probably would be better to do the decoding here since we are after all accepting
-	// golang types.
-	sigGetter := mthdsig.NewGetter(q.chainReader)
-	sig, err := sigGetter.Get(ctx, to, method)
+	st, err := q.chainReader.GetTipSetState(ctx, q.chainReader.GetHead())
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "unable to determine return type")
+		return nil, errors.Wrap(err, "failed to load tree for latest state root")
 	}
-
-	headTs := q.chainReader.Head()
-	tsas, err := q.chainReader.GetTipSetAndState(ctx, headTs.String())
+	head, err := q.chainReader.GetTipSet(q.chainReader.GetHead())
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "couldnt get latest state root")
+		return nil, errors.Wrap(err, "failed to get the head tipset")
 	}
-	st, err := state.LoadStateTree(ctx, q.cst, tsas.TipSetStateRoot, builtin.Actors)
+	h, err := head.Height()
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "could load tree for latest state root")
-	}
-	h, err := headTs.Height()
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "couldnt get base tipset height")
+		return nil, errors.Wrap(err, "failed to get the head tipset height")
 	}
 
 	vms := vm.NewStorageMap(q.bs)
 	r, ec, err := consensus.CallQueryMethod(ctx, st, vms, to, method, encodedParams, optFrom, types.NewBlockHeight(h))
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "querymethod returned an error")
+		return nil, errors.Wrap(err, "querymethod returned an error")
 	} else if ec != 0 {
-		return nil, nil, errors.Errorf("querymethod returned a non-zero error code %d", ec)
+		return nil, errors.Errorf("querymethod returned a non-zero error code %d", ec)
 	}
-	return r, sig, nil
+	return r, nil
 }

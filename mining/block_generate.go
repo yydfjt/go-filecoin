@@ -8,10 +8,8 @@ import (
 	"context"
 	"time"
 
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
+	"github.com/pkg/errors"
 
-	"github.com/filecoin-project/go-filecoin/core"
-	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
 )
@@ -20,7 +18,7 @@ import (
 func (w *DefaultWorker) Generate(ctx context.Context,
 	baseTipSet types.TipSet,
 	ticket types.Signature,
-	proof proofs.PoStProof,
+	proof types.PoStProof,
 	nullBlockCount uint64) (*types.Block, error) {
 
 	generateTimer := time.Now()
@@ -54,13 +52,12 @@ func (w *DefaultWorker) Generate(ctx context.Context,
 		return nil, errors.Wrap(err, "get base tip set ancestors")
 	}
 
-	pending := w.messagePool.Pending()
-	messages := make([]*types.SignedMessage, len(pending))
-
-	copy(messages, core.OrderMessagesByNonce(pending))
+	pending := w.messageSource.Pending()
+	mq := NewMessageQueue(pending)
+	messages := mq.Drain()
 
 	vms := vm.NewStorageMap(w.blockstore)
-	res, err := w.processor.ApplyMessagesAndPayRewards(ctx, stateTree, vms, messages, w.minerAddr, types.NewBlockHeight(blockHeight), ancestors)
+	res, err := w.processor.ApplyMessagesAndPayRewards(ctx, stateTree, vms, messages, w.minerOwnerAddr, types.NewBlockHeight(blockHeight), ancestors)
 	if err != nil {
 		return nil, errors.Wrap(err, "generate apply messages")
 	}
@@ -74,32 +71,53 @@ func (w *DefaultWorker) Generate(ctx context.Context,
 		return nil, errors.Wrap(err, "generate flush vm storage map")
 	}
 
-	var receipts []*types.MessageReceipt
+	// By default no receipts/messages is serialized as the zero length
+	// slice, not the nil slice.
+	receipts := []*types.MessageReceipt{}
 	for _, r := range res.Results {
 		receipts = append(receipts, r.Receipt)
+	}
+
+	minedMessages := []*types.SignedMessage{}
+	for _, msg := range res.SuccessfulMessages {
+		minedMessages = append(minedMessages, msg)
+	}
+
+	// Persist messages to ipld storage
+	msgsCid, err := w.messageStore.StoreMessages(ctx, minedMessages)
+	if err != nil {
+		return nil, errors.Wrap(err, "error persisting messages")
+	}
+	rcptsCid, err := w.messageStore.StoreReceipts(ctx, receipts)
+	if err != nil {
+		return nil, errors.Wrap(err, "error persisting receipts")
 	}
 
 	next := &types.Block{
 		Miner:           w.minerAddr,
 		Height:          types.Uint64(blockHeight),
-		Messages:        res.SuccessfulMessages,
-		MessageReceipts: receipts,
-		Parents:         baseTipSet.ToSortedCidSet(),
+		Messages:        msgsCid,
+		MessageReceipts: rcptsCid,
+		Parents:         baseTipSet.Key(),
 		ParentWeight:    types.Uint64(weight),
 		Proof:           proof,
 		StateRoot:       newStateTreeCid,
 		Ticket:          ticket,
+		// TODO when #2961 is resolved do the needful here.
+		Timestamp: types.Uint64(time.Now().Unix()),
 	}
 
-	// TODO: Should we really be pruning the message pool here at all? Maybe this should happen elsewhere.
 	for i, msg := range res.PermanentFailures {
 		// We will not be able to apply this message in the future because the error was permanent.
 		// Therefore, we will remove it from the MessagePool now.
+		// There might be better places to do this, such as wherever successful messages are removed
+		// from the pool, or by posting the failure to an event bus to be handled async.
 		log.Infof("permanent ApplyMessage failure, [%s] (%s)", msg, res.PermanentErrors[i])
-		// Intentionally not handling error case, since it just means we won't be able to remove from pool.
 		mc, err := msg.Cid()
 		if err == nil {
-			w.messagePool.Remove(mc)
+			w.messageSource.Remove(mc)
+		} else {
+			log.Warningf("failed to get CID from message", err)
 		}
 	}
 

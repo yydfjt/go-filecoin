@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmfWqohMtbivn5NRJvtrLzCW3EU4QmoLvVNtmvo9vbdtVA/refmt/obj"
-	"gx/ipfs/QmfWqohMtbivn5NRJvtrLzCW3EU4QmoLvVNtmvo9vbdtVA/refmt/shared"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-hamt-ipld"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/pkg/errors"
+	"github.com/polydawn/refmt/obj"
+	"github.com/polydawn/refmt/shared"
 
 	"github.com/filecoin-project/go-filecoin/actor"
 	"github.com/filecoin-project/go-filecoin/address"
@@ -47,13 +47,34 @@ type Tree interface {
 
 var _ Tree = &tree{}
 
+// IpldStore defines an interface for interacting with a hamt.CborIpldStore.
+// TODO #3078 use go-ipld-cbor export
+type IpldStore interface {
+	Put(ctx context.Context, v interface{}) (cid.Cid, error)
+	Get(ctx context.Context, c cid.Cid, out interface{}) error
+}
+
+// TreeLoader defines an interfaces for loading a state tree from an IpldStore.
+type TreeLoader interface {
+	LoadStateTree(ctx context.Context, store IpldStore, c cid.Cid, builtinActors map[cid.Cid]exec.ExecutableActor) (Tree, error)
+}
+
+// TreeStateLoader implements the state.StateLoader interface.
+type TreeStateLoader struct{}
+
+// LoadStateTree is a wrapper around state.LoadStateTree.
+func (stl *TreeStateLoader) LoadStateTree(ctx context.Context, store IpldStore, c cid.Cid, builtinActors map[cid.Cid]exec.ExecutableActor) (Tree, error) {
+	return LoadStateTree(ctx, store, c, builtinActors)
+}
+
 // LoadStateTree loads the state tree referenced by the given cid.
-func LoadStateTree(ctx context.Context, store *hamt.CborIpldStore, c cid.Cid, builtinActors map[cid.Cid]exec.ExecutableActor) (Tree, error) {
-	root, err := hamt.LoadNode(ctx, store, c)
+func LoadStateTree(ctx context.Context, store IpldStore, c cid.Cid, builtinActors map[cid.Cid]exec.ExecutableActor) (Tree, error) {
+	// TODO ideally this assertion can go away when #3078 lands in go-ipld-cbor
+	root, err := hamt.LoadNode(ctx, store.(*hamt.CborIpldStore), c)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to load node")
+		return nil, errors.Wrapf(err, "failed to load node for %s", c)
 	}
-	stateTree := newEmptyStateTree(store)
+	stateTree := newEmptyStateTree(store.(*hamt.CborIpldStore))
 	stateTree.root = root
 
 	stateTree.builtinActors = builtinActors
@@ -243,33 +264,38 @@ func (t *tree) debugPointer(ps []*hamt.Pointer) {
 	}
 }
 
-// GetAllActors returns a slice of all actors in the StateTree, t.
-func GetAllActors(t Tree) ([]string, []*actor.Actor) {
-	st := t.(*tree)
-
-	return st.getActorsFromPointers(st.root.Pointers)
+// GetAllActorsResult is the struct returned via a channel by the GetAllActors
+// method. This struct contains only an address string and the actor itself.
+type GetAllActorsResult struct {
+	Address string
+	Actor   *actor.Actor
+	Error   error
 }
 
-// GetAllActorsFromStoreFunc is a function with the signature of GetAllActorsFromStore
-type GetAllActorsFromStoreFunc = func(context.Context, *hamt.CborIpldStore, cid.Cid) ([]string, []*actor.Actor, error)
+// GetAllActors returns a channel which provides all actors in the StateTree, t.
+func GetAllActors(ctx context.Context, t Tree) <-chan GetAllActorsResult {
+	st := t.(*tree)
+	out := make(chan GetAllActorsResult)
+	go func() {
+		defer close(out)
+		st.getActorsFromPointers(ctx, out, st.root.Pointers)
+	}()
+	return out
+}
 
-// GetAllActorsFunc is a function with the signature of GetAllActors
-type GetAllActorsFunc = func(t Tree) ([]string, []*actor.Actor)
-
-// GetAllActorsFromStore loads a StateTree and returns arrays of addresses and their corresponding actors.
-// Third returned value is any error that occurred when loading.
-func GetAllActorsFromStore(ctx context.Context, store *hamt.CborIpldStore, stateRoot cid.Cid) ([]string, []*actor.Actor, error) {
+// GetAllActorsFromStore loads a StateTree and returns a channel with addresses
+// and their corresponding actors. The second returned value is any error that
+// occurred when loading.
+func GetAllActorsFromStore(ctx context.Context, store *hamt.CborIpldStore, stateRoot cid.Cid) (<-chan GetAllActorsResult, error) {
 	st, err := LoadStateTree(ctx, store, stateRoot, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
-	addrs, actors := GetAllActors(st)
-	return addrs, actors, nil
+	return GetAllActors(ctx, st), nil
 }
 
 // NOTE: This extracts actors from pointers recursively. Maybe we shouldn't recurse here.
-func (t *tree) getActorsFromPointers(ps []*hamt.Pointer) (addresses []string, actors []*actor.Actor) {
+func (t *tree) getActorsFromPointers(ctx context.Context, out chan<- GetAllActorsResult, ps []*hamt.Pointer) {
 	for _, p := range ps {
 		for _, kv := range p.KVs {
 			var a actor.Actor
@@ -277,8 +303,18 @@ func (t *tree) getActorsFromPointers(ps []*hamt.Pointer) (addresses []string, ac
 				panic(err) // uhm, ignoring errors is bad
 			}
 
-			addresses = append(addresses, kv.Key)
-			actors = append(actors, &a)
+			select {
+			case <-ctx.Done():
+				out <- GetAllActorsResult{
+					Error: ctx.Err(),
+				}
+				return
+			default:
+				out <- GetAllActorsResult{
+					Address: kv.Key,
+					Actor:   &a,
+				}
+			}
 		}
 		if p.Link.Defined() {
 			n, err := hamt.LoadNode(context.Background(), t.store, p.Link)
@@ -287,10 +323,7 @@ func (t *tree) getActorsFromPointers(ps []*hamt.Pointer) (addresses []string, ac
 			if err != nil {
 				continue
 			}
-			moreAddrs, moreActors := t.getActorsFromPointers(n.Pointers)
-			addresses = append(addresses, moreAddrs...)
-			actors = append(actors, moreActors...)
+			t.getActorsFromPointers(ctx, out, n.Pointers)
 		}
 	}
-	return
 }

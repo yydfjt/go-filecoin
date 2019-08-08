@@ -8,25 +8,20 @@ import (
 	"context"
 	"time"
 
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-ipfs-blockstore"
+	logging "github.com/ipfs/go-log"
+	"github.com/pkg/errors"
+
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/chain"
 	"github.com/filecoin-project/go-filecoin/consensus"
-	"github.com/filecoin-project/go-filecoin/core"
-	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
-
-	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	"gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
 )
 
 var log = logging.Logger("mining")
-
-// DefaultBlockTime is the estimated proving period time.
-// We define this so that we can fake mining in the current incomplete system.
-const DefaultBlockTime = 30 * time.Second
 
 // Output is the result of a single mining run. It has either a new
 // block or an error, mimicing the golang (retVal, error) pattern.
@@ -59,16 +54,33 @@ type GetWeight func(context.Context, types.TipSet) (uint64, error)
 // process the input tipset.
 type GetAncestors func(context.Context, types.TipSet, *types.BlockHeight) ([]types.TipSet, error)
 
+// MessageSource provides message candidates for mining into blocks
+type MessageSource interface {
+	// Pending returns a slice of un-mined messages.
+	Pending() []*types.SignedMessage
+	// Remove removes a message from the source permanently
+	Remove(message cid.Cid)
+}
+
 // A MessageApplier processes all the messages in a message pool.
 type MessageApplier interface {
 	// ApplyMessagesAndPayRewards applies all state transitions related to a set of messages.
-	ApplyMessagesAndPayRewards(ctx context.Context, st state.Tree, vms vm.StorageMap, messages []*types.SignedMessage, minerAddr address.Address, bh *types.BlockHeight, ancestors []types.TipSet) (consensus.ApplyMessagesResponse, error)
+	ApplyMessagesAndPayRewards(ctx context.Context, st state.Tree, vms vm.StorageMap, messages []*types.SignedMessage, minerOwnerAddr address.Address, bh *types.BlockHeight, ancestors []types.TipSet) (consensus.ApplyMessagesResponse, error)
+}
+
+type workerPorcelainAPI interface {
+	BlockTime() time.Duration
 }
 
 // DefaultWorker runs a mining job.
 type DefaultWorker struct {
-	createPoST DoSomeWorkFunc  // TODO: rename createPoSTFunc
-	minerAddr  address.Address // TODO: needs to be a key in the near future
+	api workerPorcelainAPI
+
+	createPoSTFunc DoSomeWorkFunc
+	minerAddr      address.Address
+	minerOwnerAddr address.Address
+	minerWorker    address.Address
+	workerSigner   consensus.TicketSigner
 
 	// consensus things
 	getStateTree GetStateTree
@@ -76,35 +88,65 @@ type DefaultWorker struct {
 	getAncestors GetAncestors
 
 	// core filecoin things
-	messagePool *core.MessagePool
-	processor   MessageApplier
-	powerTable  consensus.PowerTableView
-	blockstore  blockstore.Blockstore
-	cstore      *hamt.CborIpldStore
-	blockTime   time.Duration
+	messageSource MessageSource
+	processor     MessageApplier
+	messageStore  chain.MessageWriter // nolint: structcheck
+	powerTable    consensus.PowerTableView
+	blockstore    blockstore.Blockstore
+}
+
+// WorkerParameters use for NewDefaultWorker parameters
+type WorkerParameters struct {
+	API workerPorcelainAPI
+
+	MinerAddr      address.Address
+	MinerOwnerAddr address.Address
+	MinerWorker    address.Address
+	WorkerSigner   consensus.TicketSigner
+
+	// consensus things
+	GetStateTree GetStateTree
+	GetWeight    GetWeight
+	GetAncestors GetAncestors
+
+	// core filecoin things
+	MessageSource MessageSource
+	Processor     MessageApplier
+	PowerTable    consensus.PowerTableView
+	MessageStore  chain.MessageWriter
+	Blockstore    blockstore.Blockstore
 }
 
 // NewDefaultWorker instantiates a new Worker.
-func NewDefaultWorker(messagePool *core.MessagePool, getStateTree GetStateTree, getWeight GetWeight, getAncestors GetAncestors, processor MessageApplier, powerTable consensus.PowerTableView, bs blockstore.Blockstore, cst *hamt.CborIpldStore, miner address.Address, bt time.Duration) *DefaultWorker {
-	w := NewDefaultWorkerWithDeps(messagePool, getStateTree, getWeight, getAncestors, processor, powerTable, bs, cst, miner, bt, func() {})
-	w.createPoST = w.fakeCreatePoST
+func NewDefaultWorker(parameters WorkerParameters) *DefaultWorker {
+	w := NewDefaultWorkerWithDeps(parameters,
+		func() {})
+
+	// TODO: create real PoST.
+	// https://github.com/filecoin-project/go-filecoin/issues/1791
+	w.createPoSTFunc = w.fakeCreatePoST
+
 	return w
 }
 
 // NewDefaultWorkerWithDeps instantiates a new Worker with custom functions.
-func NewDefaultWorkerWithDeps(messagePool *core.MessagePool, getStateTree GetStateTree, getWeight GetWeight, getAncestors GetAncestors, processor MessageApplier, powerTable consensus.PowerTableView, bs blockstore.Blockstore, cst *hamt.CborIpldStore, miner address.Address, bt time.Duration, createPoST DoSomeWorkFunc) *DefaultWorker {
+func NewDefaultWorkerWithDeps(parameters WorkerParameters,
+	createPoST DoSomeWorkFunc) *DefaultWorker {
 	return &DefaultWorker{
-		getStateTree: getStateTree,
-		getWeight:    getWeight,
-		getAncestors: getAncestors,
-		messagePool:  messagePool,
-		processor:    processor,
-		powerTable:   powerTable,
-		blockstore:   bs,
-		cstore:       cst,
-		createPoST:   createPoST,
-		minerAddr:    miner,
-		blockTime:    bt,
+		api:            parameters.API,
+		getStateTree:   parameters.GetStateTree,
+		getWeight:      parameters.GetWeight,
+		getAncestors:   parameters.GetAncestors,
+		messageSource:  parameters.MessageSource,
+		messageStore:   parameters.MessageStore,
+		processor:      parameters.Processor,
+		powerTable:     parameters.PowerTable,
+		blockstore:     parameters.Blockstore,
+		createPoSTFunc: createPoST,
+		minerAddr:      parameters.MinerAddr,
+		minerOwnerAddr: parameters.MinerOwnerAddr,
+		minerWorker:    parameters.MinerWorker,
+		workerSigner:   parameters.WorkerSigner,
 	}
 }
 
@@ -119,7 +161,7 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 	log.Info("Worker.Mine")
 	ctx = log.Start(ctx, "Worker.Mine")
 	defer log.Finish(ctx)
-	if len(base) == 0 {
+	if !base.Defined() {
 		log.Warning("Worker.Mine returning because it can't mine on an empty tipset")
 		outCh <- Output{Err: errors.New("bad input tipset with no blocks sent to Mine()")}
 		return false
@@ -143,9 +185,9 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 		outCh <- Output{Err: err}
 		return false
 	}
-	prCh := createProof(challenge, w.createPoST)
+	prCh := createProof(challenge, w.createPoSTFunc)
 
-	var proof proofs.PoStProof
+	var proof types.PoStProof
 	var ticket []byte
 	select {
 	case <-ctx.Done():
@@ -156,11 +198,16 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 			log.Errorf("Worker.Mine got zero value from channel prChRead")
 			return false
 		}
-		copy(proof[:], prChRead[:])
-		ticket = consensus.CreateTicket(proof, w.minerAddr)
+		proof := append(types.PoStProof{}, prChRead[:]...)
+		ticket, err = consensus.CreateTicket(proof, w.minerWorker, w.workerSigner)
+		if err != nil {
+			log.Errorf("failed to create ticket: %s", err)
+			return false
+		}
 	}
 
-	// TODO: Test the interplay of isWinningTicket() and createPoST()
+	// TODO: Test the interplay of isWinningTicket() and createPoSTFunc()
+	// https://github.com/filecoin-project/go-filecoin/issues/1791
 	weHaveAWinner, err := consensus.IsWinningTicket(ctx, w.blockstore, w.powerTable, st, ticket, w.minerAddr)
 
 	if err != nil {
@@ -173,8 +220,8 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 		next, err := w.Generate(ctx, base, ticket, proof, uint64(nullBlkCount))
 		if err == nil {
 			log.SetTag(ctx, "block", next)
+			log.Debugf("Worker.Mine generates new winning block! %s", next.Cid().String())
 		}
-		log.Debugf("Worker.Mine generates new winning block! %s", next.Cid().String())
 		outCh <- NewOutput(next, err)
 		return true
 	}
@@ -184,10 +231,12 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 
 // TODO: Actually use the results of the PoST once it is implemented.
 // Currently createProof just passes the challenge seed through.
-func createProof(challengeSeed proofs.PoStChallengeSeed, createPoST DoSomeWorkFunc) <-chan proofs.PoStChallengeSeed {
-	c := make(chan proofs.PoStChallengeSeed)
+func createProof(challengeSeed types.PoStChallengeSeed, createPoST DoSomeWorkFunc) <-chan types.PoStChallengeSeed {
+	c := make(chan types.PoStChallengeSeed)
 	go func() {
-		createPoST() // TODO send new PoST on channel once we can create it
+		// TODO send new PoST on channel once we can create it
+		//  https://github.com/filecoin-project/go-filecoin/issues/1791
+		createPoST()
 		c <- challengeSeed
 	}()
 	return c
@@ -196,5 +245,5 @@ func createProof(challengeSeed proofs.PoStChallengeSeed, createPoST DoSomeWorkFu
 // fakeCreatePoST is the default implementation of DoSomeWorkFunc.
 // It simply sleeps for the blockTime.
 func (w *DefaultWorker) fakeCreatePoST() {
-	time.Sleep(w.blockTime)
+	time.Sleep(w.api.BlockTime())
 }

@@ -2,52 +2,52 @@ package msg
 
 import (
 	"context"
+	"testing"
 
-	hamt "gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	bstore "gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
-	bserv "gx/ipfs/QmYPZzd9VqmJDwxUnThfeSbV1Y5o53aVPDijTB7j7rS9Ep/go-blockservice"
-	offline "gx/ipfs/QmYZwey1thDTynSrvd6qQkX24UpTka6TFhQ2v569UpoqxD/go-ipfs-exchange-offline"
+	bserv "github.com/ipfs/go-blockservice"
+	hamt "github.com/ipfs/go-hamt-ipld"
+	bstore "github.com/ipfs/go-ipfs-blockstore"
+	offline "github.com/ipfs/go-ipfs-exchange-offline"
+	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/chain"
 	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/repo"
 	"github.com/filecoin-project/go-filecoin/wallet"
-	"github.com/stretchr/testify/require"
 )
 
 type commonDeps struct {
 	repo       repo.Repo
 	wallet     *wallet.Wallet
-	chainStore *chain.DefaultStore
+	chainStore *chain.Store
+	messages   *chain.MessageStore
 	blockstore bstore.Blockstore
 	cst        *hamt.CborIpldStore
 }
 
-func requireCommonDeps(require *require.Assertions) *commonDeps { //nolint: deadcode
-	return requireCommonDepsWithGif(require, consensus.InitGenesis)
-}
-
-func requireCommonDepsWithGif(require *require.Assertions, gif consensus.GenesisInitFunc) *commonDeps {
+func requiredCommonDeps(t *testing.T, gif consensus.GenesisInitFunc) *commonDeps { // nolint: deadcode
 	r := repo.NewInMemoryRepo()
 	bs := bstore.NewBlockstore(r.Datastore())
-	return requireCommonDepsWithGifAndBlockstore(require, gif, r, bs)
+	return requireCommonDepsWithGifAndBlockstore(t, gif, r, bs)
 }
 
 // This version is useful if you are installing actors with consensus.AddActor and you
 // need to set some actor state up ahead of time (actor state is ultimately found in the
 // block store).
-func requireCommonDepsWithGifAndBlockstore(require *require.Assertions, gif consensus.GenesisInitFunc, r repo.Repo, bs bstore.Blockstore) *commonDeps {
+func requireCommonDepsWithGifAndBlockstore(t *testing.T, gif consensus.GenesisInitFunc, r repo.Repo, bs bstore.Blockstore) *commonDeps {
 	cst := &hamt.CborIpldStore{Blocks: bserv.New(bs, offline.Exchange(bs))}
 	chainStore, err := chain.Init(context.Background(), r, bs, cst, gif)
-	require.NoError(err)
+	require.NoError(t, err)
+	messageStore := chain.NewMessageStore(cst)
 	backend, err := wallet.NewDSBackend(r.WalletDatastore())
-	require.NoError(err)
+	require.NoError(t, err)
 	wallet := wallet.New(backend)
 
 	return &commonDeps{
 		repo:       r,
 		wallet:     wallet,
 		chainStore: chainStore,
+		messages:   messageStore,
 		blockstore: bs,
 		cst:        cst,
 	}

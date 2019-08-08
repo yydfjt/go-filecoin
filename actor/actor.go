@@ -3,9 +3,9 @@ package actor
 
 import (
 	"fmt"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
+	"github.com/ipfs/go-cid"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/types"
 )
@@ -14,10 +14,8 @@ func init() {
 	cbor.RegisterCborType(Actor{})
 }
 
-var (
-	// ErrInvalidActorLength is returned when the actor length does not match the expected length.
-	ErrInvalidActorLength = errors.New("invalid actor length")
-)
+// DefaultGasCost is default gas cost for the actor calls.
+const DefaultGasCost = 100
 
 // Actor is the central abstraction of entities in the system.
 //
@@ -36,10 +34,31 @@ var (
 //
 // Not safe for concurrent access.
 type Actor struct {
-	Code    cid.Cid `refmt:",omitempty"`
-	Head    cid.Cid `refmt:",omitempty"`
-	Nonce   types.Uint64
-	Balance *types.AttoFIL
+	// Code is a CID of the VM code for this actor's implementation (or a constant for actors implemented in Go code).
+	// Code may be nil for an uninitialized actor (which exists because it has received a balance).
+	Code cid.Cid `refmt:",omitempty"`
+	// Head is the CID of the root of the actor's state tree.
+	Head cid.Cid `refmt:",omitempty"`
+	// Nonce is the nonce expected on the next message from this actor.
+	// Messages are processed in strict, contiguous nonce order.
+	Nonce types.Uint64
+	// Balance is the amount of FIL in the actor's account.
+	Balance types.AttoFIL
+}
+
+// NewActor constructs a new actor.
+func NewActor(code cid.Cid, balance types.AttoFIL) *Actor {
+	return &Actor{
+		Code:    code,
+		Head:    cid.Undef,
+		Nonce:   0,
+		Balance: balance,
+	}
+}
+
+// Empty tests whether the actor's code is defined.
+func (a *Actor) Empty() bool {
+	return !a.Code.Defined()
 }
 
 // IncNonce increments the nonce of this actor by 1.
@@ -58,16 +77,6 @@ func (a *Actor) Cid() (cid.Cid, error) {
 	return obj.Cid(), nil
 }
 
-// NewActor constructs a new actor.
-func NewActor(code cid.Cid, balance *types.AttoFIL) *Actor {
-	return &Actor{
-		Code:    code,
-		Head:    cid.Undef,
-		Nonce:   0,
-		Balance: balance,
-	}
-}
-
 // Unmarshal a actor from the given bytes.
 func (a *Actor) Unmarshal(b []byte) error {
 	return cbor.DecodeInto(b, a)
@@ -81,4 +90,19 @@ func (a *Actor) Marshal() ([]byte, error) {
 // Format implements fmt.Formatter.
 func (a *Actor) Format(f fmt.State, c rune) {
 	f.Write([]byte(fmt.Sprintf("<%s (%p); balance: %v; nonce: %d>", types.ActorCodeTypeName(a.Code), a, a.Balance, a.Nonce))) // nolint: errcheck
+}
+
+///// Utility functions (non-methods) /////
+
+// NextNonce returns the nonce value for an account actor, which is the nonce expected on the
+// next message to be sent from that actor.
+// Returns zero for a nil actor, which is the value expected on the first message.
+func NextNonce(actor *Actor) (uint64, error) {
+	if actor == nil {
+		return 0, nil
+	}
+	if !(actor.Empty() || actor.Code.Equals(types.AccountActorCodeCid)) {
+		return 0, errors.New("next nonce only defined for account or empty actors")
+	}
+	return uint64(actor.Nonce), nil
 }

@@ -5,12 +5,13 @@ import (
 	"io"
 	"math/big"
 	"strconv"
+	"strings"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
-	"gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmds"
+	"github.com/libp2p/go-libp2p-core/peer"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/porcelain"
@@ -22,39 +23,13 @@ var minerCmd = &cmds.Command{
 		Tagline: "Manage a single miner actor",
 	},
 	Subcommands: map[string]*cmds.Command{
-		"create":        minerCreateCmd,
-		"add-ask":       minerAddAskCmd,
-		"owner":         minerOwnerCmd,
-		"pledge":        minerPledgeCmd,
-		"power":         minerPowerCmd,
-		"set-price":     minerSetPriceCmd,
-		"update-peerid": minerUpdatePeerIDCmd,
-	},
-}
-
-var minerPledgeCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline:          "View number of pledged sectors for <miner>",
-		ShortDescription: `Shows the number of pledged sectors for the given miner address`,
-	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("miner", true, false, "The miner address"),
-	},
-	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		var err error
-
-		minerAddr, err := optionalAddr(req.Arguments[0])
-		if err != nil {
-			return err
-		}
-		pledgeSectors, err := GetAPI(env).Miner().GetPledge(req.Context, minerAddr)
-		if err != nil {
-			return err
-		}
-
-		str := fmt.Sprintf("%d", pledgeSectors)
-		re.Emit(str) // nolint: errcheck
-		return nil
+		"create":         minerCreateCmd,
+		"owner":          minerOwnerCmd,
+		"power":          minerPowerCmd,
+		"set-price":      minerSetPriceCmd,
+		"update-peerid":  minerUpdatePeerIDCmd,
+		"collateral":     minerCollateralCmd,
+		"proving-period": minerProvingPeriodCmd,
 	},
 }
 
@@ -67,17 +42,19 @@ type MinerCreateResult struct {
 
 var minerCreateCmd = &cmds.Command{
 	Helptext: cmdkit.HelpText{
-		Tagline: "Create a new file miner with <pledge> sectors and <collateral> FIL",
+		Tagline: "Create a new file miner with <collateral> FIL",
 		ShortDescription: `Issues a new message to the network to create the miner, then waits for the
 message to be mined as this is required to return the address of the new miner.
-Collateral must be greater than 0.001 FIL per pledged sector.`,
+Collateral will be committed at the rate of 0.001FIL per sector. When the 
+miner's collateral drops below 0.001FIL, the miner will not be able to commit
+additional sectors.`,
 	},
 	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("pledge", true, false, "The size of the pledge (in sectors) for the miner"),
-		cmdkit.StringArg("collateral", true, false, "The amount of collateral in FIL to be sent (minimum 0.001 FIL per sector)"),
+		cmdkit.StringArg("collateral", true, false, "The amount of collateral, in FIL."),
 	},
 	Options: []cmdkit.Option{
-		cmdkit.StringOption("from", "Address to send from"),
+		cmdkit.StringOption("sectorsize", "size of the sectors which this miner will commit, in bytes"),
+		cmdkit.StringOption("from", "address to send from"),
 		cmdkit.StringOption("peerid", "Base58-encoded libp2p peer ID that the miner will operate"),
 		priceOption,
 		limitOption,
@@ -86,7 +63,30 @@ Collateral must be greater than 0.001 FIL per pledged sector.`,
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
 		var err error
 
-		fromAddr, err := optionalAddr(req.Options["from"])
+		pp, err := GetPorcelainAPI(env).ProtocolParameters(req.Context)
+		if err != nil {
+			return err
+		}
+
+		sectorSize, err := optionalSectorSizeWithDefault(req.Options["sectorsize"], pp.SupportedSectorSizes[0])
+		if err != nil {
+			return err
+		}
+
+		// TODO: It may become the case that the protocol does not specify an
+		// enumeration of supported sector sizes, but rather that any sector
+		// size for which a miner has Groth parameters and a verifying key is
+		// supported.
+		// https://github.com/filecoin-project/specs/pull/318
+		if !pp.IsSupportedSectorSize(sectorSize) {
+			supportedStrs := make([]string, len(pp.SupportedSectorSizes))
+			for i, ss := range pp.SupportedSectorSizes {
+				supportedStrs[i] = ss.String()
+			}
+			return fmt.Errorf("unsupported sector size: %s (supported sizes: %s)", sectorSize, strings.Join(supportedStrs, ", "))
+		}
+
+		fromAddr, err := fromAddrOrDefault(req, env)
 		if err != nil {
 			return err
 		}
@@ -99,13 +99,11 @@ Collateral must be greater than 0.001 FIL per pledged sector.`,
 				return errors.Wrap(err, "invalid peer id")
 			}
 		}
-
-		pledge, err := strconv.ParseUint(req.Arguments[0], 10, 64)
-		if err != nil {
-			return ErrInvalidPledge
+		if pid == "" {
+			pid = GetPorcelainAPI(env).NetworkGetPeerID()
 		}
 
-		collateral, ok := types.NewAttoFILFromFILString(req.Arguments[1])
+		collateral, ok := types.NewAttoFILFromFILString(req.Arguments[0])
 		if !ok {
 			return ErrInvalidCollateral
 		}
@@ -119,27 +117,34 @@ Collateral must be greater than 0.001 FIL per pledged sector.`,
 			usedGas, err := GetPorcelainAPI(env).MinerPreviewCreate(
 				req.Context,
 				fromAddr,
-				pledge,
+				sectorSize,
 				pid,
-				collateral,
 			)
 			if err != nil {
 				return err
 			}
 			return re.Emit(&MinerCreateResult{
-				Address: address.Address{},
+				Address: address.Undef,
 				GasUsed: usedGas,
 				Preview: true,
 			})
 		}
 
-		addr, err := GetAPI(env).Miner().Create(req.Context, fromAddr, gasPrice, gasLimit, pledge, pid, collateral)
+		addr, err := GetPorcelainAPI(env).MinerCreate(
+			req.Context,
+			fromAddr,
+			gasPrice,
+			gasLimit,
+			sectorSize,
+			pid,
+			collateral,
+		)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "Could not create miner. Please consult the documentation to setup your wallet and genesis block correctly")
 		}
 
 		return re.Emit(&MinerCreateResult{
-			Address: addr,
+			Address: *addr,
 			GasUsed: types.NewGasUnits(0),
 			Preview: false,
 		})
@@ -157,7 +162,8 @@ Collateral must be greater than 0.001 FIL per pledged sector.`,
 	},
 }
 
-type minerSetPriceResult struct {
+// MinerSetPriceResult is the return type for miner set-price command
+type MinerSetPriceResult struct {
 	GasUsed               types.GasUnits
 	MinerSetPriceResponse porcelain.MinerSetPriceResponse
 	Preview               bool
@@ -170,7 +176,7 @@ var minerSetPriceCmd = &cmds.Command{
 This command waits for the ask to be mined.`,
 	},
 	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("storageprice", true, false, "The new price of storage per sector in FIL"),
+		cmdkit.StringArg("storageprice", true, false, "The new price of storage in FIL per byte per block"),
 		cmdkit.StringArg("expiry", true, false, "How long this ask is valid for in blocks"),
 	},
 	Options: []cmdkit.Option{
@@ -186,7 +192,7 @@ This command waits for the ask to be mined.`,
 			return ErrInvalidPrice
 		}
 
-		fromAddr, err := optionalAddr(req.Options["from"])
+		fromAddr, err := fromAddrOrDefault(req, env)
 		if err != nil {
 			return err
 		}
@@ -219,7 +225,7 @@ This command waits for the ask to be mined.`,
 			if err != nil {
 				return err
 			}
-			return re.Emit(&minerSetPriceResult{
+			return re.Emit(&MinerSetPriceResult{
 				GasUsed:               usedGas,
 				Preview:               true,
 				MinerSetPriceResponse: porcelain.MinerSetPriceResponse{},
@@ -238,15 +244,15 @@ This command waits for the ask to be mined.`,
 			return err
 		}
 
-		return re.Emit(&minerSetPriceResult{
+		return re.Emit(&MinerSetPriceResult{
 			GasUsed:               types.NewGasUnits(0),
 			Preview:               false,
 			MinerSetPriceResponse: res,
 		})
 	},
-	Type: &minerSetPriceResult{},
+	Type: &MinerSetPriceResult{},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, res *minerSetPriceResult) error {
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, res *MinerSetPriceResult) error {
 			if res.Preview {
 				output := strconv.FormatUint(uint64(res.GasUsed), 10)
 				_, err := w.Write([]byte(output))
@@ -255,7 +261,7 @@ This command waits for the ask to be mined.`,
 			_, err := fmt.Fprintf(w, `Set price for miner %s to %s.
 	Published ask, cid: %s.
 	Ask confirmed on chain in block: %s.
-	`,
+`,
 				res.MinerSetPriceResponse.MinerAddr.String(),
 				res.MinerSetPriceResponse.Price.String(),
 				res.MinerSetPriceResponse.AddAskCid.String(),
@@ -266,7 +272,8 @@ This command waits for the ask to be mined.`,
 	},
 }
 
-type minerUpdatePeerIDResult struct {
+// MinerUpdatePeerIDResult is the return type for miner update-peerid command
+type MinerUpdatePeerIDResult struct {
 	Cid     cid.Cid
 	GasUsed types.GasUnits
 	Preview bool
@@ -293,7 +300,7 @@ var minerUpdatePeerIDCmd = &cmds.Command{
 			return err
 		}
 
-		fromAddr, err := optionalAddr(req.Options["from"])
+		fromAddr, err := fromAddrOrDefault(req, env)
 		if err != nil {
 			return err
 		}
@@ -320,116 +327,36 @@ var minerUpdatePeerIDCmd = &cmds.Command{
 				return err
 			}
 
-			return re.Emit(&minerUpdatePeerIDResult{
+			return re.Emit(&MinerUpdatePeerIDResult{
 				Cid:     cid.Cid{},
 				GasUsed: usedGas,
 				Preview: true,
 			})
 		}
 
-		c, err := GetAPI(env).Miner().UpdatePeerID(req.Context, fromAddr, minerAddr, gasPrice, gasLimit, newPid)
+		c, err := GetPorcelainAPI(env).MessageSend(
+			req.Context,
+			fromAddr,
+			minerAddr,
+			types.ZeroAttoFIL,
+			gasPrice,
+			gasLimit,
+			"updatePeerID",
+			newPid,
+		)
 		if err != nil {
 			return err
 		}
 
-		return re.Emit(&minerUpdatePeerIDResult{
+		return re.Emit(&MinerUpdatePeerIDResult{
 			Cid:     c,
 			GasUsed: types.NewGasUnits(0),
 			Preview: false,
 		})
 	},
-	Type: &minerUpdatePeerIDResult{},
+	Type: &MinerUpdatePeerIDResult{},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, res *minerUpdatePeerIDResult) error {
-			if res.Preview {
-				output := strconv.FormatUint(uint64(res.GasUsed), 10)
-				_, err := w.Write([]byte(output))
-				return err
-			}
-			return PrintString(w, res.Cid)
-		}),
-	},
-}
-
-type minerAddAskResult struct {
-	Cid     cid.Cid
-	GasUsed types.GasUnits
-	Preview bool
-}
-
-var minerAddAskCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "DEPRECATED: Use set-price",
-	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("miner", true, false, "The address of the miner owning the ask"),
-		cmdkit.StringArg("price", true, false, "The price in FIL of the ask"),
-		cmdkit.StringArg("expiry", true, false, "How long this ask is valid for in blocks"),
-	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption("from", "Address to send the ask from"),
-		priceOption,
-		limitOption,
-		previewOption,
-	},
-	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		fromAddr, err := optionalAddr(req.Options["from"])
-		if err != nil {
-			return err
-		}
-
-		minerAddr, err := address.NewFromString(req.Arguments[0])
-		if err != nil {
-			return errors.Wrap(err, "invalid miner address")
-		}
-
-		price, ok := types.NewAttoFILFromFILString(req.Arguments[1])
-		if !ok {
-			return ErrInvalidPrice
-		}
-
-		expiry, ok := big.NewInt(0).SetString(req.Arguments[2], 10)
-		if !ok {
-			return fmt.Errorf("expiry must be a valid integer")
-		}
-
-		gasPrice, gasLimit, preview, err := parseGasOptions(req)
-		if err != nil {
-			return err
-		}
-
-		if preview {
-			usedGas, err := GetPorcelainAPI(env).MessagePreview(
-				req.Context,
-				fromAddr,
-				minerAddr,
-				"addAsk",
-				price,
-				expiry,
-			)
-			if err != nil {
-				return err
-			}
-			return re.Emit(&minerAddAskResult{
-				Cid:     cid.Cid{},
-				GasUsed: usedGas,
-				Preview: true,
-			})
-		}
-
-		c, err := GetAPI(env).Miner().AddAsk(req.Context, fromAddr, minerAddr, gasPrice, gasLimit, price, expiry)
-		if err != nil {
-			return err
-		}
-		return re.Emit(&minerAddAskResult{
-			Cid:     c,
-			GasUsed: types.NewGasUnits(0),
-			Preview: false,
-		})
-	},
-	Type: &minerAddAskResult{},
-	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, res *minerAddAskResult) error {
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, res *MinerUpdatePeerIDResult) error {
 			if res.Preview {
 				output := strconv.FormatUint(uint64(res.GasUsed), 10)
 				_, err := w.Write([]byte(output))
@@ -450,7 +377,7 @@ var minerOwnerCmd = &cmds.Command{
 		if err != nil {
 			return err
 		}
-		ownerAddr, err := GetAPI(env).Miner().GetOwner(req.Context, minerAddr)
+		ownerAddr, err := GetPorcelainAPI(env).MinerGetOwnerAddress(req.Context, minerAddr)
 		if err != nil {
 			return err
 		}
@@ -479,24 +406,86 @@ Values will be output as a ratio where the first number is the miner power and s
 		if err != nil {
 			return err
 		}
-		power, err := GetAPI(env).Miner().GetPower(req.Context, minerAddr)
-		if err != nil {
-			return err
-		}
-		total, err := GetAPI(env).Miner().GetTotalPower(req.Context)
-		if err != nil {
-			return err
-		}
 
-		str := fmt.Sprintf("%d / %d", power, total)
-		return re.Emit(str)
+		minerPower, err := GetPorcelainAPI(env).MinerGetPower(req.Context, minerAddr)
+		if err != nil {
+			return err
+		}
+		return re.Emit(minerPower)
 	},
+	Type: porcelain.MinerPower{},
 	Arguments: []cmdkit.Argument{
 		cmdkit.StringArg("miner", true, false, "The address of the miner"),
 	},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, a string) error {
-			_, err := fmt.Fprintln(w, a)
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *porcelain.MinerPower) error {
+			outStr := fmt.Sprintf("%s / %s", out.Power.String(), out.Total.String())
+			_, err := fmt.Fprintln(w, outStr)
+			return err
+		}),
+	},
+}
+
+var minerCollateralCmd = &cmds.Command{
+	Helptext: cmdkit.HelpText{
+		Tagline:          "Get the active collateral of a miner",
+		ShortDescription: `Check the actively staked collateral of a given miner. Values reported in attoFIL`,
+	},
+	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
+		minerAddr, err := optionalAddr(req.Arguments[0])
+		if err != nil {
+			return err
+		}
+		collateral, err := GetPorcelainAPI(env).MinerGetCollateral(req.Context, minerAddr)
+		if err != nil {
+			return err
+		}
+		return re.Emit(collateral)
+	},
+	Arguments: []cmdkit.Argument{
+		cmdkit.StringArg("miner", true, false, "The address of the miner"),
+	},
+	Type: types.AttoFIL{},
+	Encoders: cmds.EncoderMap{
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, af types.AttoFIL) error {
+			return PrintString(w, af)
+		}),
+	},
+}
+
+var minerProvingPeriodCmd = &cmds.Command{
+	Arguments: []cmdkit.Argument{
+		cmdkit.StringArg("miner", true, false, "Miner address to get proving period for"),
+	},
+	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
+		// Get the Miner Address
+		minerAddress, err := address.NewFromString(req.Arguments[0])
+		if err != nil {
+			return err
+		}
+
+		mpp, err := GetPorcelainAPI(env).MinerGetProvingPeriod(req.Context, minerAddress)
+		if err != nil {
+			return err
+		}
+		return re.Emit(mpp)
+	},
+	Type: porcelain.MinerProvingPeriod{},
+	Encoders: cmds.EncoderMap{
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, res *porcelain.MinerProvingPeriod) error {
+			var pSet []string
+			for p := range res.ProvingSet {
+				pSet = append(pSet, p)
+			}
+			_, err := fmt.Fprintf(w, `Proving Period
+Start:      %s
+End:        %s
+ProvingSet: %s
+`,
+				res.Start.String(),
+				res.End.String(),
+				pSet,
+			)
 			return err
 		}),
 	},

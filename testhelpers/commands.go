@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -18,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmZcLBXKaFe8ND5YHPkJRAwmhJGrVsi1JqDZNyJ4nRK5Mj/go-multiaddr-net"
+	"github.com/ipfs/go-cid"
+	ma "github.com/multiformats/go-multiaddr"
+	"github.com/multiformats/go-multiaddr-net"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/config"
@@ -34,6 +35,8 @@ import (
 const (
 	// DefaultDaemonCmdTimeout is the default timeout for executing commands.
 	DefaultDaemonCmdTimeout = 1 * time.Minute
+	repoName                = "repo"
+	sectorsName             = "sectors"
 )
 
 // Output manages running, inprocess, a filecoin command.
@@ -97,11 +100,12 @@ func RunSuccessLines(td *TestDaemon, args ...string) []string {
 type TestDaemon struct {
 	cmdAddr          string
 	swarmAddr        string
-	repoDir          string
+	containerDir     string // Path to directory containing repo and sectors
 	genesisFile      string
 	keyFiles         []string
 	withMiner        string
 	autoSealInterval string
+	isRelay          bool
 
 	firstRun bool
 	init     bool
@@ -120,7 +124,12 @@ type TestDaemon struct {
 
 // RepoDir returns the repo directory of the test daemon.
 func (td *TestDaemon) RepoDir() string {
-	return td.repoDir
+	return path.Join(td.containerDir, repoName)
+}
+
+// SectorDir returns the sector root directory of the test daemon.
+func (td *TestDaemon) SectorDir() string {
+	return path.Join(td.containerDir, sectorsName)
 }
 
 // CmdAddr returns the command address of the test daemon.
@@ -153,7 +162,7 @@ func (td *TestDaemon) RunWithStdin(stdin io.Reader, args ...string) *Output {
 		args = strings.Split(args[0], " ")
 	}
 
-	finalArgs := append(args, "--repodir="+td.repoDir, "--cmdapiaddr="+td.cmdAddr)
+	finalArgs := append(args, "--repodir="+td.RepoDir(), "--cmdapiaddr="+td.cmdAddr)
 
 	td.test.Logf("(%s) run: %q\n", td.swarmAddr, strings.Join(finalArgs, " "))
 	cmd := exec.CommandContext(ctx, bin, finalArgs...)
@@ -402,11 +411,7 @@ func (td *TestDaemon) Shutdown() {
 		td.test.Fatalf("Failed to kill daemon %s", err)
 	}
 
-	if td.repoDir == "" {
-		panic("testdaemon had no repodir set")
-	}
-
-	_ = os.RemoveAll(td.repoDir)
+	td.cleanupFilesystem()
 }
 
 // ShutdownSuccess stops the daemon, asserting that it exited successfully.
@@ -415,8 +420,7 @@ func (td *TestDaemon) ShutdownSuccess() {
 	assert.NoError(td.test, err)
 
 	td.assertNoLogErrors()
-
-	_ = os.RemoveAll(td.repoDir)
+	td.cleanupFilesystem()
 }
 
 func (td *TestDaemon) assertNoLogErrors() {
@@ -446,7 +450,7 @@ func (td *TestDaemon) ShutdownEasy() {
 	tdOut := td.ReadStderr()
 	assert.NoError(td.test, err, tdOut)
 
-	_ = os.RemoveAll(td.repoDir)
+	td.cleanupFilesystem()
 }
 
 // WaitForAPI polls if the API on the daemon is available, and blocks until
@@ -463,21 +467,19 @@ func (td *TestDaemon) WaitForAPI() error {
 	return fmt.Errorf("filecoin node failed to come online in given time period (10 seconds); last err = %s", err)
 }
 
-// CreateMinerAddr issues a new message to the network, mines the message
+// CreateStorageMinerAddr issues a new message to the network, mines the message
 // and returns the address of the new miner
 // equivalent to:
-//     `go-filecoin miner create --from $TEST_ACCOUNT 100000 20`
-func (td *TestDaemon) CreateMinerAddr(peer *TestDaemon, fromAddr string) address.Address {
-	require := require.New(td.test)
-
+//     `go-filecoin miner create --from $TEST_ACCOUNT 20`
+func (td *TestDaemon) CreateStorageMinerAddr(peer *TestDaemon, fromAddr string) address.Address {
 	var wg sync.WaitGroup
 	var minerAddr address.Address
 	wg.Add(1)
 	go func() {
-		miner := td.RunSuccess("miner", "create", "--from", fromAddr, "--price", "0", "--limit", "300", "100", "20")
+		miner := td.RunSuccess("miner", "create", "--from", fromAddr, "--gas-price", "1", "--gas-limit", "100", "20")
 		addr, err := address.NewFromString(strings.Trim(miner.ReadStdout(), "\n"))
-		require.NoError(err)
-		require.NotEqual(addr, address.Address{})
+		require.NoError(td.test, err)
+		require.NotEqual(td.test, addr, address.Undef)
 		minerAddr = addr
 		wg.Done()
 	}()
@@ -486,24 +488,39 @@ func (td *TestDaemon) CreateMinerAddr(peer *TestDaemon, fromAddr string) address
 	return minerAddr
 }
 
-// MinerSetPrice creates an ask for a CURRENTLY MINING test daemon and waits for it to appears on chain
-func (td *TestDaemon) MinerSetPrice(minerAddr string, fromAddr string, price string, expiry string) {
-	td.RunSuccess("miner", "set-price", "--from", fromAddr, "--miner", minerAddr, "--price", "0", "--limit", "300", price, expiry)
+// MinerSetPrice creates an ask for a CURRENTLY MINING test daemon and waits for it to appears on chain. It returns the
+// cid of the AddAsk message so other daemons can `message wait` for it.
+func (td *TestDaemon) MinerSetPrice(minerAddr string, fromAddr string, price string, expiry string) cid.Cid {
+	setPriceReturn := td.RunSuccess("miner", "set-price",
+		"--from", fromAddr,
+		"--miner", minerAddr,
+		"--gas-price", "1",
+		"--gas-limit", "300",
+		"--enc", "json",
+		price, expiry).ReadStdout()
+
+	resultStruct := struct {
+		MinerSetPriceResponse struct {
+			AddAskCid cid.Cid
+		}
+	}{}
+
+	if err := json.Unmarshal([]byte(setPriceReturn), &resultStruct); err != nil {
+		require.NoError(td.test, err)
+	}
+	return resultStruct.MinerSetPriceResponse.AddAskCid
 }
 
 // UpdatePeerID updates a currently mining miner's peer ID
 func (td *TestDaemon) UpdatePeerID() {
-	require := require.New(td.test)
-	assert := assert.New(td.test)
-
 	var idOutput map[string]interface{}
 	peerIDJSON := td.RunSuccess("id").ReadStdout()
 	err := json.Unmarshal([]byte(peerIDJSON), &idOutput)
-	require.NoError(err)
-	updateCidStr := td.RunSuccess("miner", "update-peerid", "--price=0", "--limit=300", td.GetMinerAddress().String(), idOutput["ID"].(string)).ReadStdoutTrimNewlines()
+	require.NoError(td.test, err)
+	updateCidStr := td.RunSuccess("miner", "update-peerid", "--gas-price=1", "--gas-limit=300", td.GetMinerAddress().String(), idOutput["ID"].(string)).ReadStdoutTrimNewlines()
 	updateCid, err := cid.Parse(updateCidStr)
-	require.NoError(err)
-	assert.NotNil(updateCid)
+	require.NoError(td.test, err)
+	assert.NotNil(td.test, updateCid)
 
 	td.WaitForMessageRequireSuccess(updateCid)
 }
@@ -519,13 +536,13 @@ func (td *TestDaemon) WaitForMessageRequireSuccess(msgCid cid.Cid) *types.Messag
 	return rcpt
 }
 
-// CreateWalletAddr adds a new address to the daemons wallet and
+// CreateAddress adds a new address to the daemons wallet and
 // returns it.
 // equivalent to:
-//     `go-filecoin wallet addrs new`
-func (td *TestDaemon) CreateWalletAddr() string {
+//     `go-filecoin address new`
+func (td *TestDaemon) CreateAddress() string {
 	td.test.Helper()
-	outNew := td.RunSuccess("wallet", "addrs", "new")
+	outNew := td.RunSuccess("address", "new")
 	addr := strings.Trim(outNew.ReadStdout(), "\n")
 	require.NotEmpty(td.test, addr)
 	return addr
@@ -533,7 +550,7 @@ func (td *TestDaemon) CreateWalletAddr() string {
 
 // Config is a helper to read out the config of the deamon
 func (td *TestDaemon) Config() *config.Config {
-	cfg, err := config.ReadFile(filepath.Join(td.repoDir, "config.json"))
+	cfg, err := config.ReadFile(filepath.Join(td.RepoDir(), "config.json"))
 	require.NoError(td.test, err)
 	return cfg
 }
@@ -558,21 +575,23 @@ func (td *TestDaemon) MustHaveChainHeadBy(wait time.Duration, peers []*TestDaemo
 	var wg sync.WaitGroup
 
 	expHeadBlks := td.GetChainHead()
-	var expHead types.SortedCidSet
+	var expHeadCids []cid.Cid
 	for _, blk := range expHeadBlks {
-		expHead.Add(blk.Cid())
+		expHeadCids = append(expHeadCids, blk.Cid())
 	}
+	expHeadKey := types.NewTipSetKey(expHeadCids...)
 
 	for _, p := range peers {
 		wg.Add(1)
 		go func(p *TestDaemon) {
 			for {
 				actHeadBlks := p.GetChainHead()
-				var actHead types.SortedCidSet
+				var actHeadCids []cid.Cid
 				for _, blk := range actHeadBlks {
-					actHead.Add(blk.Cid())
+					actHeadCids = append(actHeadCids, blk.Cid())
 				}
-				if expHead.Equals(actHead) {
+				actHeadKey := types.NewTipSetKey(actHeadCids...)
+				if expHeadKey.Equals(actHeadKey) {
 					wg.Done()
 					return
 				}
@@ -626,7 +645,7 @@ func (td *TestDaemon) MakeMoney(rewards int, peers ...*TestDaemon) {
 
 // GetDefaultAddress returns the default sender address for this daemon.
 func (td *TestDaemon) GetDefaultAddress() string {
-	addrs := td.RunSuccess("wallet", "addrs", "ls")
+	addrs := td.RunSuccess("address", "ls")
 	return strings.Split(addrs.ReadStdout(), "\n")[0]
 }
 
@@ -673,10 +692,10 @@ func SwarmAddr(addr string) func(*TestDaemon) {
 	}
 }
 
-// RepoDir allows setting the `repoDir` config option on the daemon.
-func RepoDir(dir string) func(*TestDaemon) {
+// ContainerDir sets the `containerDir` path for the daemon.
+func ContainerDir(dir string) func(*TestDaemon) {
 	return func(td *TestDaemon) {
-		td.repoDir = dir
+		td.containerDir = dir
 	}
 }
 
@@ -730,20 +749,19 @@ func WithMiner(m string) func(*TestDaemon) {
 	}
 }
 
+// IsRelay starts the daemon with the --is-relay option.
+func IsRelay(td *TestDaemon) {
+	td.isRelay = true
+}
+
 // NewDaemon creates a new `TestDaemon`, using the passed in configuration options.
 func NewDaemon(t *testing.T, options ...func(*TestDaemon)) *TestDaemon {
 	t.Helper()
 	// Ensure we have the actual binary
 	filecoinBin := MustGetFilecoinBinary()
 
-	dir, err := ioutil.TempDir("", "go-fil-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	td := &TestDaemon{
 		test:        t,
-		repoDir:     dir,
 		init:        true, // we want to init unless told otherwise
 		firstRun:    true,
 		cmdTimeout:  DefaultDaemonCmdTimeout,
@@ -755,11 +773,20 @@ func NewDaemon(t *testing.T, options ...func(*TestDaemon)) *TestDaemon {
 		option(td)
 	}
 
-	repoDirFlag := fmt.Sprintf("--repodir=%s", td.repoDir)
-	blockTimeFlag := fmt.Sprintf("--block-time=%s", BlockTimeTest)
+	// Allocate directory for repo and sectors. If set already it is assumed to exist.
+	if td.containerDir == "" {
+		newDir, err := ioutil.TempDir("", "daemon-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		td.containerDir = newDir
+	}
+
+	repoDirFlag := fmt.Sprintf("--repodir=%s", td.RepoDir())
+	sectorDirFlag := fmt.Sprintf("--sectordir=%s", td.SectorDir())
 
 	// build command options
-	initopts := []string{repoDirFlag}
+	initopts := []string{repoDirFlag, sectorDirFlag}
 
 	if td.genesisFile != "" {
 		initopts = append(initopts, fmt.Sprintf("--genesisfile=%s", td.genesisFile))
@@ -801,8 +828,13 @@ func NewDaemon(t *testing.T, options ...func(*TestDaemon)) *TestDaemon {
 
 	swarmListenFlag := fmt.Sprintf("--swarmlisten=%s", td.swarmAddr)
 	cmdAPIAddrFlag := fmt.Sprintf("--cmdapiaddr=%s", td.cmdAddr)
+	blockTimeFlag := fmt.Sprintf("--block-time=%s", BlockTimeTest)
 
 	td.daemonArgs = []string{filecoinBin, "daemon", repoDirFlag, cmdAPIAddrFlag, swarmListenFlag, blockTimeFlag}
+
+	if td.isRelay {
+		td.daemonArgs = append(td.daemonArgs, "--is-relay")
+	}
 
 	return td
 }
@@ -820,7 +852,7 @@ func RunInit(td *TestDaemon, opts ...string) ([]byte, error) {
 
 // GenesisFilePath returns the path of the WalletFile
 func GenesisFilePath() string {
-	return ProjectRoot("/fixtures/genesis.car")
+	return ProjectRoot("/fixtures/test/genesis.car")
 }
 
 // ProjectRoot return the project root joined with any path fragments
@@ -857,5 +889,16 @@ func (td *TestDaemon) createNewProcess() {
 	td.Stdin, err = td.process.StdinPipe()
 	if err != nil {
 		td.test.Fatal(err)
+	}
+}
+
+func (td *TestDaemon) cleanupFilesystem() {
+	if td.containerDir != "" {
+		err := os.RemoveAll(td.containerDir)
+		if err != nil {
+			td.test.Logf("error removing dir %s: %s", td.containerDir, err)
+		}
+	} else {
+		td.test.Logf("testdaemon has nil container dir")
 	}
 }

@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"testing"
 
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
+	cbor "github.com/ipfs/go-ipld-cbor"
 
+	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -19,7 +20,7 @@ type fooTestMessage struct {
 }
 
 func TestMessageSending(t *testing.T) {
-	assert := assert.New(t)
+	tf.UnitTest(t)
 
 	buf := new(bytes.Buffer)
 	w := NewMsgWriter(buf)
@@ -33,12 +34,12 @@ func TestMessageSending(t *testing.T) {
 	}
 
 	for _, it := range items {
-		assert.NoError(w.WriteMsg(it))
+		assert.NoError(t, w.WriteMsg(it))
 	}
 
 	for _, it := range items {
 		var msg fooTestMessage
-		assert.NoError(r.ReadMsg(&msg))
-		assert.Equal(it, msg)
+		assert.NoError(t, r.ReadMsg(&msg))
+		assert.Equal(t, it, msg)
 	}
 }

@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"testing"
 
-	gengen "github.com/filecoin-project/go-filecoin/gengen/util"
+	"github.com/filecoin-project/go-filecoin/commands"
+	"github.com/filecoin-project/go-filecoin/gengen/util"
+	"github.com/filecoin-project/go-filecoin/types"
 )
 
 // GenesisInfo chains require information to start a single node with funds
@@ -28,14 +30,16 @@ type idResult struct {
 func MustGenerateGenesis(t *testing.T, funds int64, dir string) *GenesisInfo {
 	// Setup, generate a genesis and key file
 	cfg := &gengen.GenesisCfg{
-		Keys: 1,
+		ProofsMode: types.TestProofsMode,
+		Keys:       1,
 		PreAlloc: []string{
 			strconv.FormatInt(funds, 10),
 		},
-		Miners: []gengen.Miner{
+		Miners: []*gengen.CreateStorageMinerConfig{
 			{
-				Owner: 0,
-				Power: 1,
+				Owner:               0,
+				NumCommittedSectors: 1,
+				SectorSize:          types.OneKiBSectorSize.Uint64(),
 			},
 		},
 	}
@@ -55,12 +59,13 @@ func MustGenerateGenesis(t *testing.T, funds int64, dir string) *GenesisInfo {
 		t.Fatal(err)
 	}
 
-	key := info.Keys[0]
-	if err := json.NewEncoder(keyfile).Encode(key); err != nil {
+	var wsr commands.WalletSerializeResult
+	wsr.KeyInfo = append(wsr.KeyInfo, info.Keys[0])
+	if err := json.NewEncoder(keyfile).Encode(wsr); err != nil {
 		t.Fatal(err)
 	}
 
-	walletAddr, err := key.Address()
+	walletAddr, err := info.Keys[0].Address()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +96,7 @@ func MustImportGenesisMiner(tn *TestNode, gi *GenesisInfo) {
 	tn.MustRunCmdJSON(ctx, &id, "go-filecoin", "id")
 
 	// Update miner
-	tn.MustRunCmd(ctx, "go-filecoin", "miner", "update-peerid", "--from="+gi.WalletAddress, "--price=0", "--limit=300", gi.MinerAddress, id.ID)
+	tn.MustRunCmd(ctx, "go-filecoin", "miner", "update-peerid", "--from="+gi.WalletAddress, "--gas-price=1", "--gas-limit=300", gi.MinerAddress, id.ID)
 }
 
 // MustInitWithGenesis init TestNode, passing in the `--genesisfile` flag, by calling MustInit

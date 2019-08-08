@@ -1,7 +1,7 @@
 package types
 
 import (
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	logging "github.com/ipfs/go-log"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	wutil "github.com/filecoin-project/go-filecoin/wallet/util"
@@ -10,7 +10,7 @@ import (
 var log = logging.Logger("types")
 
 // Signature is the result of a cryptographic sign operation.
-type Signature = Bytes
+type Signature []byte
 
 // IsValidSignature cryptographically verifies that 'sig' is the signed hash of 'data' with
 // the public key belonging to `addr`.
@@ -21,7 +21,11 @@ func IsValidSignature(data []byte, addr address.Address, sig Signature) bool {
 		log.Infof("error in signature validation: %s", err)
 		return false
 	}
-	maybeAddrHash := address.Hash(maybePk)
+	maybeAddr, err := address.NewSecp256k1Address(maybePk)
+	if err != nil {
+		log.Infof("error in recovered address: %s", err)
+		return false
+	}
 
-	return address.NewMainnet(maybeAddrHash) == addr
+	return maybeAddr == addr
 }

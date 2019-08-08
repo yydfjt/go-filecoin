@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmds"
 
 	"github.com/filecoin-project/go-filecoin/types"
 )
@@ -29,18 +29,24 @@ var chainHeadCmd = &cmds.Command{
 		Tagline: "Get heaviest tipset CIDs",
 	},
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		ts := GetPorcelainAPI(env).ChainHead(req.Context)
-
-		// Sort CIDs for a stable order
-		tsSlice := ts.ToSlice()
-		out := types.SortedCidSet{}
-		for _, b := range tsSlice {
-			out.Add(b.Cid())
+		head, err := GetPorcelainAPI(env).ChainHead()
+		if err != nil {
+			return err
 		}
-
-		return re.Emit(out)
+		return re.Emit(head.Key())
 	},
 	Type: []cid.Cid{},
+	Encoders: cmds.EncoderMap{
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, res []cid.Cid) error {
+			for _, r := range res {
+				_, err := fmt.Fprintln(w, r.String())
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		}),
+	},
 }
 
 var chainLsCmd = &cmds.Command{
@@ -52,19 +58,19 @@ var chainLsCmd = &cmds.Command{
 		cmdkit.BoolOption("long", "l", "List blocks in long format, including CID, Miner, StateRoot, block height and message count respectively"),
 	},
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
-		for raw := range GetPorcelainAPI(env).ChainLs(req.Context) {
-			switch v := raw.(type) {
-			case error:
-				return v
-			case types.TipSet:
-				if len(v) == 0 {
-					panic("tipsets from this channel should have at least one member")
-				}
-				if err := re.Emit(v.ToSlice()); err != nil {
-					return err
-				}
-			default:
-				return fmt.Errorf("unexpected type")
+		iter, err := GetPorcelainAPI(env).ChainLs(req.Context)
+		if err != nil {
+			return err
+		}
+		for ; !iter.Complete(); err = iter.Next() {
+			if err != nil {
+				return err
+			}
+			if !iter.Value().Defined() {
+				panic("tipsets from this iterator should have at least one member")
+			}
+			if err := re.Emit(iter.Value().ToSlice()); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -87,7 +93,7 @@ var chainLsCmd = &cmds.Command{
 					output.WriteString("\t")
 					output.WriteString(strconv.FormatUint(uint64(block.Height), 10))
 					output.WriteString("\t")
-					output.WriteString(strconv.Itoa(len(block.Messages)))
+					output.WriteString(block.Messages.String())
 				} else {
 					output.WriteString(block.Cid().String())
 				}

@@ -6,19 +6,17 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"syscall"
 
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmZcLBXKaFe8ND5YHPkJRAwmhJGrVsi1JqDZNyJ4nRK5Mj/go-multiaddr-net"
-	"gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
-	"gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds/cli"
-	cmdhttp "gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds/http"
-	"gx/ipfs/QmdcULN1WCzgoQmcCaUAmEhwcxHYsDrbZ2LvRJKCL8dMrK/go-homedir"
-	"gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmdkit"
+	"github.com/ipfs/go-ipfs-cmds"
+	"github.com/ipfs/go-ipfs-cmds/cli"
+	cmdhttp "github.com/ipfs/go-ipfs-cmds/http"
+	ma "github.com/multiformats/go-multiaddr"
+	"github.com/multiformats/go-multiaddr-net"
+	"github.com/pkg/errors"
 
-	"github.com/filecoin-project/go-filecoin/api/impl"
+	"github.com/filecoin-project/go-filecoin/paths"
 	"github.com/filecoin-project/go-filecoin/repo"
 	"github.com/filecoin-project/go-filecoin/types"
 )
@@ -29,6 +27,9 @@ const (
 
 	// OptionRepoDir is the name of the option for specifying the directory of the repo.
 	OptionRepoDir = "repodir"
+
+	// OptionSectorDir is the name of the option for specifying the directory into which staged and sealed sectors will be written.
+	OptionSectorDir = "sectordir"
 
 	// APIPrefix is the prefix for the http version of the api.
 	APIPrefix = "/api"
@@ -68,8 +69,8 @@ const (
 	// GenesisFile is the path of file containing archive of genesis block DAG data
 	GenesisFile = "genesisfile"
 
-	// DevnetTest populates config bootstrap addrs with the dns multiaddrs of the test devnet and other test devnet specific bootstrap parameters
-	DevnetTest = "devnet-test"
+	// DevnetStaging populates config bootstrap addrs with the dns multiaddrs of the staging devnet and other staging devnet specific bootstrap parameters
+	DevnetStaging = "devnet-staging"
 
 	// DevnetNightly populates config bootstrap addrs with the dns multiaddrs of the nightly devnet and other nightly devnet specific bootstrap parameters
 	DevnetNightly = "devnet-nightly"
@@ -105,16 +106,20 @@ MINE
 VIEW DATA STRUCTURES
   go-filecoin chain                  - Inspect the filecoin blockchain
   go-filecoin dag                    - Interact with IPLD DAG objects
+  go-filecoin deals                  - Manage deals made by or with this node
   go-filecoin show                   - Get human-readable representations of filecoin objects
 
 NETWORK COMMANDS
+  go-filecoin bitswap                - Explore libp2p bitswap
   go-filecoin bootstrap              - Interact with bootstrap addresses
+  go-filecoin dht                    - Interact with the dht
   go-filecoin id                     - Show info about the network peers
   go-filecoin ping <peer ID>...      - Send echo request packets to p2p network members
   go-filecoin swarm                  - Interact with the swarm
+  go-filecoin stats                  - Monitor statistics on your network usage
 
 ACTOR COMMANDS
-  go-filecoin actor                  - Interact with actors. Actors are built-in smart contracts.
+  go-filecoin actor                  - Interact with actors. Actors are built-in smart contracts
   go-filecoin paych                  - Payment channel operations
 
 MESSAGE COMMANDS
@@ -122,13 +127,15 @@ MESSAGE COMMANDS
   go-filecoin mpool                  - Manage the message pool
 
 TOOL COMMANDS
-  go-filecoin log                    - Interact with the daemon event log output.
+  go-filecoin inspect                - Show info about the go-filecoin node
+  go-filecoin log                    - Interact with the daemon event log output
+  go-filecoin protocol               - Show protocol parameter details
   go-filecoin version                - Show go-filecoin version information
 `,
 	},
 	Options: []cmdkit.Option{
 		cmdkit.StringOption(OptionAPI, "set the api port to use"),
-		cmdkit.StringOption(OptionRepoDir, "set the directory of the repo, defaults to ~/.filecoin"),
+		cmdkit.StringOption(OptionRepoDir, "set the repo directory, defaults to ~/.filecoin/repo"),
 		cmds.OptionEncodingType,
 		cmdkit.BoolOption("help", "Show the full command help text."),
 		cmdkit.BoolOption("h", "Show a short version of the command help text."),
@@ -143,32 +150,40 @@ var rootCmdDaemon = &cmds.Command{
 
 // all top level commands, not available to daemon
 var rootSubcmdsLocal = map[string]*cmds.Command{
-	"daemon": daemonCmd,
-	"init":   initCmd,
+	"daemon":  daemonCmd,
+	"init":    initCmd,
+	"version": versionCmd,
 }
 
 // all top level commands, available on daemon. set during init() to avoid configuration loops.
 var rootSubcmdsDaemon = map[string]*cmds.Command{
 	"actor":            actorCmd,
 	"address":          addrsCmd,
+	"bitswap":          bitswapCmd,
 	"bootstrap":        bootstrapCmd,
 	"chain":            chainCmd,
 	"config":           configCmd,
 	"client":           clientCmd,
 	"dag":              dagCmd,
+	"deals":            dealsCmd,
+	"dht":              dhtCmd,
 	"id":               idCmd,
+	"inspect":          inspectCmd,
 	"log":              logCmd,
 	"message":          msgCmd,
 	"miner":            minerCmd,
 	"mining":           miningCmd,
 	"mpool":            mpoolCmd,
+	"outbox":           outboxCmd,
 	"paych":            paymentChannelCmd,
 	"ping":             pingCmd,
+	"protocol":         protocolCmd,
 	"retrieval-client": retrievalClientCmd,
 	"show":             showCmd,
+	"stats":            statsCmd,
 	"swarm":            swarmCmd,
-	"version":          versionCmd,
 	"wallet":           walletCmd,
+	"version":          versionCmd,
 }
 
 func init() {
@@ -195,7 +210,7 @@ func Run(args []string, stdin, stdout, stderr *os.File) (int, error) {
 }
 
 func buildEnv(ctx context.Context, req *cmds.Request) (cmds.Environment, error) {
-	return &Env{ctx: ctx, api: impl.New(nil)}, nil
+	return &Env{ctx: ctx}, nil
 }
 
 type executor struct {
@@ -249,6 +264,7 @@ func makeExecutor(req *cmds.Request, env interface{}) (cmds.Executor, error) {
 
 func getAPIAddress(req *cmds.Request) (string, error) {
 	var rawAddr string
+	var err error
 	// second highest precedence is env vars.
 	if envapi := os.Getenv("FIL_API"); envapi != "" {
 		rawAddr = envapi
@@ -261,17 +277,15 @@ func getAPIAddress(req *cmds.Request) (string, error) {
 
 	// we will read the api file if no other option is given.
 	if len(rawAddr) == 0 {
-		rawPath := filepath.Join(filepath.Clean(getRepoDir(req)), repo.APIFile)
-		apiFilePath, err := homedir.Expand(rawPath)
+		repoDir, _ := req.Options[OptionRepoDir].(string)
+		repoDir, err = paths.GetRepoPath(repoDir)
 		if err != nil {
-			return "", errors.Wrap(err, fmt.Sprintf("can't resolve local repo path %s", rawPath))
+			return "", err
 		}
-
-		rawAddr, err = repo.APIAddrFromFile(apiFilePath)
+		rawAddr, err = repo.APIAddrFromRepoPath(repoDir)
 		if err != nil {
 			return "", errors.Wrap(err, "can't find API endpoint address in environment, command-line, or local repo (is the daemon running?)")
 		}
-
 	}
 
 	maddr, err := ma.NewMultiaddr(rawAddr)
@@ -288,14 +302,11 @@ func getAPIAddress(req *cmds.Request) (string, error) {
 }
 
 func requiresDaemon(req *cmds.Request) bool {
-	if req.Command == daemonCmd {
-		return false
+	for _, cmd := range rootSubcmdsLocal {
+		if req.Command == cmd {
+			return false
+		}
 	}
-
-	if req.Command == initCmd {
-		return false
-	}
-
 	return true
 }
 
@@ -317,33 +328,33 @@ func isConnectionRefused(err error) bool {
 	return syscallErr.Err == syscall.ECONNREFUSED
 }
 
-var priceOption = cmdkit.StringOption("price", "Price (FIL e.g. 0.00013) to pay for each GasUnits consumed mining this message")
-var limitOption = cmdkit.Uint64Option("limit", "Maximum number of GasUnits this message is allowed to consume")
+var priceOption = cmdkit.StringOption("gas-price", "Price (FIL e.g. 0.00013) to pay for each GasUnits consumed mining this message")
+var limitOption = cmdkit.Uint64Option("gas-limit", "Maximum number of GasUnits this message is allowed to consume")
 var previewOption = cmdkit.BoolOption("preview", "Preview the Gas cost of this command without actually executing it")
 
 func parseGasOptions(req *cmds.Request) (types.AttoFIL, types.GasUnits, bool, error) {
-	priceOption := req.Options["price"]
+	priceOption := req.Options["gas-price"]
 	if priceOption == nil {
-		return types.AttoFIL{}, types.NewGasUnits(0), false, errors.New("price option is required")
+		return types.ZeroAttoFIL, types.NewGasUnits(0), false, errors.New("gas-price option is required")
 	}
 
 	price, ok := types.NewAttoFILFromFILString(priceOption.(string))
 	if !ok {
-		return types.AttoFIL{}, types.NewGasUnits(0), false, errors.New("invalid gas price (specify FIL as a decimal number)")
+		return types.ZeroAttoFIL, types.NewGasUnits(0), false, errors.New("invalid gas price (specify FIL as a decimal number)")
 	}
 
-	limitOption := req.Options["limit"]
+	limitOption := req.Options["gas-limit"]
 	if limitOption == nil {
-		return types.AttoFIL{}, types.NewGasUnits(0), false, errors.New("limit option is required")
+		return types.ZeroAttoFIL, types.NewGasUnits(0), false, errors.New("gas-limit option is required")
 	}
 
 	gasLimitInt, ok := limitOption.(uint64)
 	if !ok {
 		msg := fmt.Sprintf("invalid gas limit: %s", limitOption)
-		return types.AttoFIL{}, types.NewGasUnits(0), false, errors.New(msg)
+		return types.ZeroAttoFIL, types.NewGasUnits(0), false, errors.New(msg)
 	}
 
 	preview, _ := req.Options["preview"].(bool)
 
-	return *price, types.NewGasUnits(gasLimitInt), preview, nil
+	return price, types.NewGasUnits(gasLimitInt), preview, nil
 }

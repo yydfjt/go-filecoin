@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"math/big"
 
-	"gx/ipfs/QmcqU6QUDSXprb1518vYDGczrTJTyGwLG9eUa5iNX4xUtS/go-libp2p-peer"
+	"github.com/libp2p/go-libp2p-core/peer"
 
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/types"
 )
 
 // ActionOption is used to pass optional arguments to actions.
@@ -15,19 +16,19 @@ import (
 // the actions.
 type ActionOption func() []string
 
-// AOPrice provides the `--price=<fil>` option to actions
+// AOPrice provides the `--gas-price=<fil>` option to actions
 func AOPrice(price *big.Float) ActionOption {
-	sPrice := fmt.Sprintf("%f", price)
+	sPrice := price.Text('f', -1)
 	return func() []string {
-		return []string{"--price", sPrice}
+		return []string{"--gas-price", sPrice}
 	}
 }
 
-// AOLimit provides the `--limit=<uint64>` option to actions
+// AOLimit provides the `--gas-limit=<uint64>` option to actions
 func AOLimit(limit uint64) ActionOption {
 	sLimit := fmt.Sprintf("%d", limit)
 	return func() []string {
-		return []string{"--limit", sLimit}
+		return []string{"--gas-limit", sLimit}
 	}
 }
 
@@ -96,5 +97,29 @@ func AOValue(value int) ActionOption {
 	sValue := fmt.Sprintf("%d", value)
 	return func() []string {
 		return []string{"--value", sValue}
+	}
+}
+
+// AOPayer provides the `--payer=<addr>` option to actions
+func AOPayer(payer address.Address) ActionOption {
+	sPayer := payer.String()
+	return func() []string {
+		return []string{"--payer", sPayer}
+	}
+}
+
+// AOValidAt provides the `--validate=<blockheight>` option to actions
+func AOValidAt(bh *types.BlockHeight) ActionOption {
+	sBH := bh.String()
+	return func() []string {
+		return []string{"--validat", sBH}
+	}
+}
+
+// AOAllowDuplicates provides the --allow-duplicates option to client propose-storage-deal
+func AOAllowDuplicates(allow bool) ActionOption {
+	sAllowDupes := fmt.Sprintf("--allow-duplicates=%t", allow)
+	return func() []string {
+		return []string{sAllowDupes}
 	}
 }

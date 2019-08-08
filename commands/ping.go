@@ -5,12 +5,23 @@ import (
 	"io"
 	"time"
 
-	peer "gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
-	cmds "gx/ipfs/Qma6uuSyjkecGhMFFLfzyJDPyoDtNJSHJNweDccZhaWkgU/go-ipfs-cmds"
-	cmdkit "gx/ipfs/Qmde5VP1qUkyQXKCfmEUA7bP64V2HAptbJ7phuPp7jXWwg/go-ipfs-cmdkit"
-
-	"github.com/filecoin-project/go-filecoin/api"
+	cmdkit "github.com/ipfs/go-ipfs-cmdkit"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	peer "github.com/libp2p/go-libp2p-core/peer"
+	//"github.com/libp2p/go-libp2p/p2p/protocol/ping"
+	"github.com/pkg/errors"
 )
+
+// PingResult is a wrapper for the pongs returned from the ping channel. It
+// contains 2 fields: Count and Time.
+//
+// * Count is a uint representing the index of pongs returned so far.
+// * Time is the amount of time elapsed from ping to pong in seconds.
+//
+type PingResult struct {
+	Count uint
+	RTT   time.Duration
+}
 
 var pingCmd = &cmds.Command{
 	Helptext: cmdkit.HelpText{
@@ -22,10 +33,10 @@ trip latency information.
 		`,
 	},
 	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("peer ID", true, true, "ID of peer to be pinged.").EnableStdin(),
+		cmdkit.StringArg("peer ID", true, false, "ID of peer to be pinged").EnableStdin(),
 	},
 	Options: []cmdkit.Option{
-		cmdkit.UintOption("count", "n", "Number of ping messages to send.").WithDefault(10),
+		cmdkit.UintOption("count", "c", "Number of ping messages to send").WithDefault(0),
 	},
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
 		peerID, err := peer.IDB58Decode(req.Arguments[0])
@@ -35,29 +46,36 @@ trip latency information.
 
 		numPings, _ := req.Options["count"].(uint)
 
-		ch, err := GetAPI(env).Ping().Ping(req.Context, peerID, numPings, time.Second)
+		pingCh, err := GetPorcelainAPI(env).NetworkPing(req.Context, peerID)
 		if err != nil {
 			return err
 		}
 
-		for p := range ch {
-			if err := re.Emit(p); err != nil {
+		for i := uint(0); numPings == 0 || i < numPings; i++ {
+			pong, pingChOpen := <-pingCh
+			if pong.Error != nil {
+				return pong.Error
+			}
+			result := &PingResult{
+				Count: i,
+				RTT:   pong.RTT,
+			}
+			if err := re.Emit(result); err != nil {
 				return err
 			}
+			if !pingChOpen {
+				return errors.New("Ping channel closed by sender")
+			}
 		}
+
 		return nil
 	},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, p *api.PingResult) error {
-			if len(p.Text) > 0 {
-				fmt.Fprintln(w, p.Text) // nolint: errcheck
-			} else if p.Success {
-				fmt.Fprintf(w, "Pong received: time=%.2f ms\n", p.Time.Seconds()*1000) // nolint: errcheck
-			} else {
-				fmt.Fprintf(w, "Pong failed\n") // nolint: errcheck
-			}
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, result *PingResult) error {
+			milliseconds := result.RTT.Seconds() * 1000
+			fmt.Fprintf(w, "Pong received: seq=%d time=%.2f ms\n", result.Count, milliseconds) // nolint: errcheck
 			return nil
 		}),
 	},
-	Type: api.PingResult{},
+	Type: PingResult{},
 }

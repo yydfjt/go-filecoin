@@ -1,44 +1,27 @@
 #!/usr/bin/env bash
 
-install_precompiled() {
-  echo "precompiled bls-signatures not supported yet"
-  return 1
-}
+set -Eeo pipefail
 
-install_local() {
-  if ! [ -x "$(command -v cargo)" ] ; then
-    echo 'Error: cargo is not installed.'
-    echo 'Install Rust toolchain to resolve this problem.'
-    exit 1
-  fi
+source "$(dirname "${BASH_SOURCE[0]}")/install-shared.bash"
 
-  git submodule update --init --recursive
+subm_dir="bls-signatures/bls-signatures"
 
-  pushd bls-signatures/bls-signatures
+git submodule update --init --recursive $subm_dir
 
-  cargo --version
-  cargo update
-  cargo build --release --all
+if download_release_tarball tarball_path "${subm_dir}"; then
+    tmp_dir=$(mktemp -d)
+    tar -C $tmp_dir -xzf $tarball_path
 
-  popd
-
-  mkdir -p bls-signatures/include
-  mkdir -p bls-signatures/lib/pkgconfig
-
-  cp bls-signatures/bls-signatures/target/release/libbls_signatures.h ./bls-signatures/include/
-  cp bls-signatures/bls-signatures/target/release/libbls_signatures_ffi.a ./bls-signatures/lib/libbls_signatures.a
-  cp bls-signatures/bls-signatures/target/release/libbls_signatures.pc ./bls-signatures/lib/pkgconfig/
-}
-
-if [ -z "$FILECOIN_USE_PRECOMPILED_BLS_SIGNATURES" ]; then
-  echo "using local bls-signatures"
-  install_local
+    cp -R "${tmp_dir}/include" bls-signatures
+    cp -R "${tmp_dir}/lib" bls-signatures
 else
-  echo "using precompiled bls-signatures"
-  install_precompiled
+    (>&2 echo "failed to find or obtain precompiled assets for ${subm_dir}, falling back to local build")
+    build_from_source "${subm_dir}"
 
-  if [ $? -ne "0" ]; then
-    echo "failed to find or obtain precompiled bls-signatures, falling back to local"
-    install_local
-  fi
+    mkdir -p bls-signatures/include
+    mkdir -p bls-signatures/lib/pkgconfig
+
+    find "${subm_dir}" -type f -name libbls_signatures.h -exec mv -- "{}" ./bls-signatures/include/ \;
+    find "${subm_dir}" -type f -name libbls_signatures_ffi.a -exec cp -- "{}" ./bls-signatures/lib/libbls_signatures.a \;
+    find "${subm_dir}" -type f -name libbls_signatures.pc -exec cp -- "{}" ./bls-signatures/lib/pkgconfig/ \;
 fi

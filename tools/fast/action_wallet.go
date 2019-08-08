@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"gx/ipfs/QmXWZCd8jfaHmt4UDSnjKmGcrQMw95bDGWqEeVLVJjoANX/go-ipfs-files"
+	"github.com/ipfs/go-ipfs-files"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/commands"
@@ -12,10 +12,10 @@ import (
 )
 
 // WalletBalance run the wallet balance command against the filecoin process.
-func (f *Filecoin) WalletBalance(ctx context.Context, addr address.Address) (*types.AttoFIL, error) {
-	var balance *types.AttoFIL
+func (f *Filecoin) WalletBalance(ctx context.Context, addr address.Address) (types.AttoFIL, error) {
+	var balance types.AttoFIL
 	if err := f.RunCmdJSONWithStdin(ctx, nil, &balance, "go-filecoin", "wallet", "balance", addr.String()); err != nil {
-		return nil, err
+		return types.ZeroAttoFIL, err
 	}
 	return balance, nil
 }
@@ -45,7 +45,7 @@ func (f *Filecoin) WalletImport(ctx context.Context, file files.File) ([]address
 // WalletExport run the wallet export command against the filecoin process.
 func (f *Filecoin) WalletExport(ctx context.Context, addrs []address.Address) ([]*types.KeyInfo, error) {
 	// the command returns an KeyInfoListResult
-	var klr commands.WalletExportResult
+	var klr commands.WalletSerializeResult
 	// we expect to interact with an array of KeyInfo(s)
 	var out []*types.KeyInfo
 	var sAddrs []string

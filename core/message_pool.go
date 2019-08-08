@@ -2,15 +2,23 @@ package core
 
 import (
 	"context"
-	"sort"
 	"sync"
 
+	"github.com/ipfs/go-cid"
+	"github.com/pkg/errors"
+
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/config"
+	"github.com/filecoin-project/go-filecoin/metrics"
 	"github.com/filecoin-project/go-filecoin/types"
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
 )
+
+var mpSize = metrics.NewInt64Gauge("message_pool_size", "The size of the message pool")
+
+// MessagePoolValidator defines a validator that ensures a message can go through the pool.
+type MessagePoolValidator interface {
+	Validate(ctx context.Context, msg *types.SignedMessage) error
+}
 
 // MessagePool keeps an unordered, de-duplicated set of Messages and supports removal by CID.
 // By 'de-duplicated' we mean that insertion of a message by cid that already
@@ -22,11 +30,39 @@ import (
 type MessagePool struct {
 	lk sync.RWMutex
 
-	pending map[cid.Cid]*types.SignedMessage // all pending messages
+	cfg           *config.MessagePoolConfig
+	validator     MessagePoolValidator
+	pending       map[cid.Cid]*timedmessage // all pending messages
+	addressNonces map[addressNonce]bool     // set of address nonce pairs used to efficiently validate duplicate nonces
 }
 
-// Add adds a message to the pool.
-func (pool *MessagePool) Add(msg *types.SignedMessage) (cid.Cid, error) {
+type timedmessage struct {
+	message *types.SignedMessage
+	addedAt uint64
+}
+
+type addressNonce struct {
+	addr  address.Address
+	nonce uint64
+}
+
+func newAddressNonce(msg *types.SignedMessage) addressNonce {
+	return addressNonce{addr: msg.From, nonce: uint64(msg.Nonce)}
+}
+
+// NewMessagePool constructs a new MessagePool.
+func NewMessagePool(cfg *config.MessagePoolConfig, validator MessagePoolValidator) *MessagePool {
+	return &MessagePool{
+		cfg:           cfg,
+		validator:     validator,
+		pending:       make(map[cid.Cid]*timedmessage),
+		addressNonces: make(map[addressNonce]bool),
+	}
+}
+
+// Add adds a message to the pool, tagged with the block height at which it was received.
+// Does nothing if the message is already in the pool.
+func (pool *MessagePool) Add(ctx context.Context, msg *types.SignedMessage, height uint64) (cid.Cid, error) {
 	pool.lk.Lock()
 	defer pool.lk.Unlock()
 
@@ -35,12 +71,19 @@ func (pool *MessagePool) Add(msg *types.SignedMessage) (cid.Cid, error) {
 		return cid.Undef, errors.Wrap(err, "failed to create CID")
 	}
 
-	// Reject messages with invalid signatires
-	if !msg.VerifySignature() {
-		return cid.Undef, errors.Errorf("failed to add message %s to pool: sig invalid", c.String())
+	// ignore message prior to validation if it is already in pool
+	_, found := pool.pending[c]
+	if found {
+		return c, nil
 	}
 
-	pool.pending[c] = msg
+	if err = pool.validateMessage(ctx, msg); err != nil {
+		return cid.Undef, errors.Wrap(err, "validation error adding message to pool")
+	}
+
+	pool.pending[c] = &timedmessage{message: msg, addedAt: height}
+	pool.addressNonces[newAddressNonce(msg)] = true
+	mpSize.Set(ctx, int64(len(pool.pending)))
 	return c, nil
 }
 
@@ -50,10 +93,23 @@ func (pool *MessagePool) Pending() []*types.SignedMessage {
 	defer pool.lk.Unlock()
 	out := make([]*types.SignedMessage, 0, len(pool.pending))
 	for _, msg := range pool.pending {
-		out = append(out, msg)
+		out = append(out, msg.message)
 	}
 
 	return out
+}
+
+// Get retrieves a message from the pool by CID.
+func (pool *MessagePool) Get(c cid.Cid) (*types.SignedMessage, bool) {
+	pool.lk.RLock()
+	defer pool.lk.RUnlock()
+	value, ok := pool.pending[c]
+	if !ok {
+		return nil, ok
+	} else if value == nil {
+		panic("Found nil message for CID " + c.String())
+	}
+	return value.message, ok
 }
 
 // Remove removes the message by CID from the pending pool.
@@ -61,190 +117,17 @@ func (pool *MessagePool) Remove(c cid.Cid) {
 	pool.lk.Lock()
 	defer pool.lk.Unlock()
 
-	delete(pool.pending, c)
-}
-
-// NewMessagePool constructs a new MessagePool.
-func NewMessagePool() *MessagePool {
-	return &MessagePool{
-		pending: make(map[cid.Cid]*types.SignedMessage),
+	msg, ok := pool.pending[c]
+	if ok {
+		delete(pool.addressNonces, newAddressNonce(msg.message))
+		delete(pool.pending, c)
 	}
-}
-
-// getParentTips returns the parent tipset of the provided tipset
-// TODO msgPool should have access to a chain store that can just look this up...
-func getParentTipSet(ctx context.Context, store *hamt.CborIpldStore, ts types.TipSet) (types.TipSet, error) {
-	newTipSet := types.TipSet{}
-	parents, err := ts.Parents()
-	if err != nil {
-		return nil, err
-	}
-	for it := parents.Iter(); !it.Complete() && ctx.Err() == nil; it.Next() {
-		var newBlk types.Block
-		if err := store.Get(ctx, it.Value(), &newBlk); err != nil {
-			return nil, err
-		}
-		if err := newTipSet.AddBlock(&newBlk); err != nil {
-			return nil, err
-		}
-	}
-	return newTipSet, nil
-}
-
-// collectChainsMessagesToHeight is a helper that collects all the messages
-// from block `b` down the chain to but not including its ancestor of
-// height `height`.  This function returns the messages collected along with
-// the tipset at the final height.
-// TODO ripe for optimizing away lots of allocations
-func collectChainsMessagesToHeight(ctx context.Context, store *hamt.CborIpldStore, curTipSet types.TipSet, height uint64) ([]*types.SignedMessage, types.TipSet, error) {
-	var msgs []*types.SignedMessage
-	h, err := curTipSet.Height()
-	if err != nil {
-		return nil, nil, err
-	}
-	for h > height {
-		for _, blk := range curTipSet {
-			msgs = append(msgs, blk.Messages...)
-		}
-		parents, err := curTipSet.Parents()
-		if err != nil {
-			return nil, nil, err
-		}
-		switch parents.Len() {
-		case 0:
-			return msgs, curTipSet, nil
-		default:
-			nextTipSet, err := getParentTipSet(ctx, store, curTipSet)
-			if err != nil {
-				return []*types.SignedMessage{}, types.TipSet{}, err
-			}
-			curTipSet = nextTipSet
-			h, err = curTipSet.Height()
-			if err != nil {
-				return nil, nil, err
-			}
-		}
-	}
-	return msgs, curTipSet, nil
-}
-
-// UpdateMessagePool brings the message pool into the correct state after
-// we accept a new block. It removes messages from the pool that are
-// found in the newly adopted chain and adds back those from the removed
-// chain (if any) that do not appear in the new chain. We think
-// that the right model for keeping the message pool up to date is
-// to think about it like a garbage collector.
-//
-// TODO there is considerable functionality missing here: don't add
-//      messages that have expired, respect nonce, do this efficiently,
-//      etc.
-func UpdateMessagePool(ctx context.Context, pool *MessagePool, store *hamt.CborIpldStore, old, new types.TipSet) error {
-	// Strategy: walk head-of-chain pointers old and new back until they are at the same
-	// height, then walk back in lockstep to find the common ancesetor.
-
-	// If old is higher/longer than new, collect all the messages
-	// from old's chain down to the height of new.
-	newHeight, err := new.Height()
-	if err != nil {
-		return err
-	}
-	addToPool, old, err := collectChainsMessagesToHeight(ctx, store, old, newHeight)
-	if err != nil {
-		return err
-	}
-	// If new is higher/longer than old, collect all the messages
-	// from new's chain down to the height of old.
-	oldHeight, err := old.Height()
-	if err != nil {
-		return err
-	}
-	removeFromPool, new, err := collectChainsMessagesToHeight(ctx, store, new, oldHeight)
-	if err != nil {
-		return err
-	}
-	// Old and new are now at the same height. Keep walking them down a
-	// tipset at a time in lockstep until they are pointing to the same
-	// tipset, the common ancestor. Collect their messages to add/remove
-	// along the way.
-	//
-	// TODO probably should limit depth here.
-	for !old.Equals(new) {
-		for _, blk := range old {
-			// skip genesis block
-			if blk.Height > 0 {
-				addToPool = append(addToPool, blk.Messages...)
-			}
-		}
-		for _, blk := range new {
-			removeFromPool = append(removeFromPool, blk.Messages...)
-		}
-		oldParents, err := old.Parents()
-		if err != nil {
-			return err
-		}
-		newParents, err := new.Parents()
-		if err != nil {
-			return err
-		}
-		if oldParents.Empty() || newParents.Empty() {
-			break
-		}
-		old, err = getParentTipSet(ctx, store, old)
-		if err != nil {
-			return err
-		}
-		new, err = getParentTipSet(ctx, store, new)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Now actually update the pool.
-	for _, m := range addToPool {
-		_, err := pool.Add(m)
-		if err != nil {
-			return err
-		}
-	}
-	// m.Cid() can error, so collect all the Cids before
-	removeCids := make([]cid.Cid, len(removeFromPool))
-	for i, m := range removeFromPool {
-		cid, err := m.Cid()
-		if err != nil {
-			return err
-		}
-		removeCids[i] = cid
-	}
-	for _, cid := range removeCids {
-		pool.Remove(cid)
-	}
-
-	return nil
-}
-
-// OrderMessagesByNonce returns the pending messages in the
-// pool ordered such that all messages with the same msg.From
-// occur in Nonce order in the slice.
-// TODO can be smarter here by skipping messages with gaps; see
-//      ethereum's abstraction for example
-// TODO order by time of receipt
-func OrderMessagesByNonce(messages []*types.SignedMessage) []*types.SignedMessage {
-	// TODO this could all be more efficient.
-	byAddress := make(map[address.Address][]*types.SignedMessage)
-	for _, m := range messages {
-		byAddress[m.From] = append(byAddress[m.From], m)
-	}
-	messages = messages[:0]
-	for _, msgs := range byAddress {
-		sort.Slice(msgs, func(i, j int) bool { return msgs[i].Nonce < msgs[j].Nonce })
-		messages = append(messages, msgs...)
-	}
-	return messages
+	mpSize.Set(context.TODO(), int64(len(pool.pending)))
 }
 
 // LargestNonce returns the largest nonce used by a message from address in the pool.
 // If no messages from address are found, found will be false.
-func LargestNonce(pool *MessagePool, address address.Address) (largest uint64, found bool) {
+func (pool *MessagePool) LargestNonce(address address.Address) (largest uint64, found bool) {
 	for _, m := range pool.Pending() {
 		if m.From == address {
 			found = true
@@ -254,4 +137,35 @@ func LargestNonce(pool *MessagePool, address address.Address) (largest uint64, f
 		}
 	}
 	return
+}
+
+// PendingBefore returns the CIDs of messages added with height less than `minimumHeight`.
+func (pool *MessagePool) PendingBefore(minimumHeight uint64) []cid.Cid {
+	pool.lk.RLock()
+	defer pool.lk.RUnlock()
+
+	var cids []cid.Cid
+	for c, msg := range pool.pending {
+		if msg.addedAt < minimumHeight {
+			cids = append(cids, c)
+		}
+	}
+	return cids
+}
+
+// validateMessage validates that too many messages aren't added to the pool and the ones that are
+// have a high probability of making it through processing.
+func (pool *MessagePool) validateMessage(ctx context.Context, message *types.SignedMessage) error {
+	if uint(len(pool.pending)) >= pool.cfg.MaxPoolSize {
+		return errors.Errorf("message pool is full (%d messages)", pool.cfg.MaxPoolSize)
+	}
+
+	// check that message with this nonce does not already exist
+	_, found := pool.addressNonces[newAddressNonce(message)]
+	if found {
+		return errors.Errorf("message pool contains message with same actor and nonce but different cid")
+	}
+
+	// check that the message is likely to succeed in processing
+	return pool.validator.Validate(ctx, message)
 }

@@ -5,9 +5,9 @@ import (
 	"math/big"
 	"reflect"
 
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
-	"gx/ipfs/QmSKyB5faguXT4NqbrXpnRXqaVj5DhSm7x9BtzFydBY1UK/go-leb128"
-	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
+	"github.com/filecoin-project/go-leb128"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/libp2p/go-libp2p-core/peer"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -24,7 +24,7 @@ const (
 	Invalid = Type(iota)
 	// Address is a address.Address
 	Address
-	// AttoFIL is a *types.AttoFIL
+	// AttoFIL is a types.AttoFIL
 	AttoFIL
 	// BytesAmount is a *types.BytesAmount
 	BytesAmount
@@ -46,6 +46,27 @@ const (
 	SectorID
 	// CommitmentsMap is a map of stringified sector id (uint64) to commitments
 	CommitmentsMap
+	// PoStProofs is an array of proof-of-spacetime proofs
+	PoStProofs
+	// Boolean is a bool
+	Boolean
+	// ProofsMode is an enumeration of possible modes of proof operation
+	ProofsMode
+	// PoRepProof is a dynamic length array of the PoRep proof-bytes
+	PoRepProof
+	// PoStProof is a dynamic length array of the PoSt proof-bytes
+	PoStProof
+	// Predicate is subset of a message used to ask an actor about a condition
+	Predicate
+	// Parameters is a slice of individually encodable parameters
+	Parameters
+	// IntSet is a set of uint64
+	IntSet
+	// MinerPoStStates is a *map[string]uint64, where string is address.Address.String()
+	// and uint8 is a miner PoStState
+	MinerPoStStates
+	// FaultSet is the faults generated during PoSt generation
+	FaultSet
 )
 
 func (t Type) String() string {
@@ -55,7 +76,7 @@ func (t Type) String() string {
 	case Address:
 		return "address.Address"
 	case AttoFIL:
-		return "*types.AttoFIL"
+		return "types.AttoFIL"
 	case BytesAmount:
 		return "*types.BytesAmount"
 	case ChannelID:
@@ -75,7 +96,27 @@ func (t Type) String() string {
 	case SectorID:
 		return "uint64"
 	case CommitmentsMap:
-		return "map[string]Commitments"
+		return "map[string]types.Commitments"
+	case PoStProofs:
+		return "[]types.PoStProof"
+	case Boolean:
+		return "bool"
+	case ProofsMode:
+		return "types.ProofsMode"
+	case PoRepProof:
+		return "types.PoRepProof"
+	case PoStProof:
+		return "types.PoStProof"
+	case Predicate:
+		return "*types.Predicate"
+	case Parameters:
+		return "[]interface{}"
+	case IntSet:
+		return "types.IntSet"
+	case MinerPoStStates:
+		return "*map[string]uint64"
+	case FaultSet:
+		return "types.FaultSet"
 	default:
 		return "<unknown type>"
 	}
@@ -94,7 +135,7 @@ func (av *Value) String() string {
 	case Address:
 		return av.Val.(address.Address).String()
 	case AttoFIL:
-		return av.Val.(*types.AttoFIL).String()
+		return av.Val.(types.AttoFIL).String()
 	case BytesAmount:
 		return av.Val.(*types.BytesAmount).String()
 	case ChannelID:
@@ -115,6 +156,26 @@ func (av *Value) String() string {
 		return fmt.Sprint(av.Val.(uint64))
 	case CommitmentsMap:
 		return fmt.Sprint(av.Val.(map[string]types.Commitments))
+	case PoStProofs:
+		return fmt.Sprint(av.Val.([]types.PoStProof))
+	case Boolean:
+		return fmt.Sprint(av.Val.(bool))
+	case ProofsMode:
+		return fmt.Sprint(av.Val.(types.ProofsMode))
+	case PoRepProof:
+		return fmt.Sprint(av.Val.(types.PoRepProof))
+	case PoStProof:
+		return fmt.Sprint(av.Val.(types.PoStProof))
+	case Predicate:
+		return fmt.Sprint(av.Val.(*types.Predicate))
+	case Parameters:
+		return fmt.Sprint(av.Val.([]interface{}))
+	case IntSet:
+		return av.Val.(types.IntSet).String()
+	case MinerPoStStates:
+		return fmt.Sprint(av.Val.(*map[address.Address]uint8))
+	case FaultSet:
+		return av.Val.(types.FaultSet).String()
 	default:
 		return "<unknown type>"
 	}
@@ -137,11 +198,11 @@ func (av *Value) Serialize() ([]byte, error) {
 	case Address:
 		addr, ok := av.Val.(address.Address)
 		if !ok {
-			return nil, &typeError{address.Address{}, av.Val}
+			return nil, &typeError{address.Undef, av.Val}
 		}
 		return addr.Bytes(), nil
 	case AttoFIL:
-		ba, ok := av.Val.(*types.AttoFIL)
+		ba, ok := av.Val.(types.AttoFIL)
 		if !ok {
 			return nil, &typeError{types.AttoFIL{}, av.Val}
 		}
@@ -214,6 +275,76 @@ func (av *Value) Serialize() ([]byte, error) {
 		}
 
 		return cbor.DumpObject(m)
+	case PoStProofs:
+		m, ok := av.Val.([]types.PoStProof)
+		if !ok {
+			return nil, &typeError{[]types.PoStProof{}, av.Val}
+		}
+
+		return cbor.DumpObject(m)
+	case Boolean:
+		v, ok := av.Val.(bool)
+		if !ok {
+			return nil, &typeError{false, av.Val}
+		}
+
+		var b byte
+		if v {
+			b = 1
+		}
+
+		return []byte{b}, nil
+	case ProofsMode:
+		v, ok := av.Val.(types.ProofsMode)
+		if !ok {
+			return nil, &typeError{types.TestProofsMode, av.Val}
+		}
+
+		return []byte{byte(v)}, nil
+	case PoRepProof:
+		b, ok := av.Val.(types.PoRepProof)
+		if !ok {
+			return nil, &typeError{types.PoRepProof{}, av.Val}
+		}
+		return b, nil
+	case PoStProof:
+		b, ok := av.Val.(types.PoStProof)
+		if !ok {
+			return nil, &typeError{types.PoStProof{}, av.Val}
+		}
+		return b, nil
+	case Predicate:
+		p, ok := av.Val.(*types.Predicate)
+		if !ok {
+			return nil, &typeError{&types.Predicate{}, av.Val}
+		}
+
+		return cbor.DumpObject(p)
+	case Parameters:
+		p, ok := av.Val.([]interface{})
+		if !ok {
+			return nil, &typeError{[]interface{}{}, av.Val}
+		}
+
+		return cbor.DumpObject(p)
+	case IntSet:
+		is, ok := av.Val.(types.IntSet)
+		if !ok {
+			return nil, &typeError{types.IntSet{}, av.Val}
+		}
+		return cbor.DumpObject(is)
+	case MinerPoStStates:
+		addrs, ok := av.Val.(*map[string]uint64)
+		if !ok {
+			return nil, &typeError{&map[string]uint64{}, av.Val}
+		}
+		return cbor.DumpObject(addrs)
+	case FaultSet:
+		fs, ok := av.Val.(types.FaultSet)
+		if !ok {
+			return nil, &typeError{types.FaultSet{}, av.Val}
+		}
+		return cbor.DumpObject(fs)
 	default:
 		return nil, fmt.Errorf("unrecognized Type: %d", av.Type)
 	}
@@ -231,7 +362,7 @@ func ToValues(i []interface{}) ([]*Value, error) {
 		switch v := v.(type) {
 		case address.Address:
 			out = append(out, &Value{Type: Address, Val: v})
-		case *types.AttoFIL:
+		case types.AttoFIL:
 			out = append(out, &Value{Type: AttoFIL, Val: v})
 		case *types.BytesAmount:
 			out = append(out, &Value{Type: BytesAmount, Val: v})
@@ -253,6 +384,26 @@ func ToValues(i []interface{}) ([]*Value, error) {
 			out = append(out, &Value{Type: SectorID, Val: v})
 		case map[string]types.Commitments:
 			out = append(out, &Value{Type: CommitmentsMap, Val: v})
+		case []types.PoStProof:
+			out = append(out, &Value{Type: PoStProofs, Val: v})
+		case bool:
+			out = append(out, &Value{Type: Boolean, Val: v})
+		case types.ProofsMode:
+			out = append(out, &Value{Type: ProofsMode, Val: v})
+		case types.PoRepProof:
+			out = append(out, &Value{Type: PoRepProof, Val: v})
+		case types.PoStProof:
+			out = append(out, &Value{Type: PoStProof, Val: v})
+		case *types.Predicate:
+			out = append(out, &Value{Type: Predicate, Val: v})
+		case []interface{}:
+			out = append(out, &Value{Type: Parameters, Val: v})
+		case types.IntSet:
+			out = append(out, &Value{Type: IntSet, Val: v})
+		case *map[string]uint64:
+			out = append(out, &Value{Type: MinerPoStStates, Val: v})
+		case types.FaultSet:
+			out = append(out, &Value{Type: FaultSet, Val: v})
 		default:
 			return nil, fmt.Errorf("unsupported type: %T", v)
 		}
@@ -283,7 +434,6 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 		if err != nil {
 			return nil, err
 		}
-
 		return &Value{
 			Type: t,
 			Val:  addr,
@@ -337,7 +487,6 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 		if err != nil {
 			return nil, err
 		}
-
 		return &Value{
 			Type: t,
 			Val:  id,
@@ -347,7 +496,6 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 			Type: t,
 			Val:  leb128.ToUInt64(data),
 		}, nil
-
 	case CommitmentsMap:
 		var m map[string]types.Commitments
 		if err := cbor.DecodeInto(data, &m); err != nil {
@@ -357,6 +505,85 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 			Type: t,
 			Val:  m,
 		}, nil
+	case PoStProofs:
+		var slice []types.PoStProof
+		if err := cbor.DecodeInto(data, &slice); err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  slice,
+		}, nil
+	case Boolean:
+		var b bool
+		if data[0] == 1 {
+			b = true
+		}
+		return &Value{
+			Type: t,
+			Val:  b,
+		}, nil
+	case ProofsMode:
+		return &Value{
+			Type: t,
+			Val:  types.ProofsMode(int(data[0])),
+		}, nil
+	case PoRepProof:
+		return &Value{
+			Type: t,
+			Val:  append(types.PoRepProof{}, data[:]...),
+		}, nil
+	case PoStProof:
+		return &Value{
+			Type: t,
+			Val:  append(types.PoStProof{}, data[:]...),
+		}, nil
+	case Predicate:
+		var predicate *types.Predicate
+		if err := cbor.DecodeInto(data, &predicate); err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  predicate,
+		}, nil
+	case Parameters:
+		var parameters []interface{}
+		if err := cbor.DecodeInto(data, &parameters); err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  parameters,
+		}, nil
+	case IntSet:
+		var is types.IntSet
+		if err := cbor.DecodeInto(data, &is); err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  is,
+		}, nil
+	case MinerPoStStates:
+		var lm *map[string]uint64
+		if err := cbor.DecodeInto(data, &lm); err != nil {
+			return nil, err
+
+		}
+		return &Value{
+			Type: t,
+			Val:  lm,
+		}, nil
+	case FaultSet:
+		fs := types.NewFaultSet([]uint64{})
+		if err := cbor.DecodeInto(data, &fs); err != nil {
+			return nil, err
+		}
+		return &Value{
+			Type: t,
+			Val:  fs,
+		}, nil
 	case Invalid:
 		return nil, ErrInvalidType
 	default:
@@ -365,18 +592,28 @@ func Deserialize(data []byte, t Type) (*Value, error) {
 }
 
 var typeTable = map[Type]reflect.Type{
-	Address:        reflect.TypeOf(address.Address{}),
-	AttoFIL:        reflect.TypeOf(&types.AttoFIL{}),
-	Bytes:          reflect.TypeOf([]byte{}),
-	BytesAmount:    reflect.TypeOf(&types.BytesAmount{}),
-	ChannelID:      reflect.TypeOf(&types.ChannelID{}),
-	BlockHeight:    reflect.TypeOf(&types.BlockHeight{}),
-	Integer:        reflect.TypeOf(&big.Int{}),
-	String:         reflect.TypeOf(string("")),
-	UintArray:      reflect.TypeOf([]uint64{}),
-	PeerID:         reflect.TypeOf(peer.ID("")),
-	SectorID:       reflect.TypeOf(uint64(0)),
-	CommitmentsMap: reflect.TypeOf(map[string]types.Commitments{}),
+	Address:         reflect.TypeOf(address.Address{}),
+	AttoFIL:         reflect.TypeOf(types.AttoFIL{}),
+	Bytes:           reflect.TypeOf([]byte{}),
+	BytesAmount:     reflect.TypeOf(&types.BytesAmount{}),
+	ChannelID:       reflect.TypeOf(&types.ChannelID{}),
+	BlockHeight:     reflect.TypeOf(&types.BlockHeight{}),
+	Integer:         reflect.TypeOf(&big.Int{}),
+	String:          reflect.TypeOf(string("")),
+	UintArray:       reflect.TypeOf([]uint64{}),
+	PeerID:          reflect.TypeOf(peer.ID("")),
+	SectorID:        reflect.TypeOf(uint64(0)),
+	CommitmentsMap:  reflect.TypeOf(map[string]types.Commitments{}),
+	PoStProofs:      reflect.TypeOf([]types.PoStProof{}),
+	Boolean:         reflect.TypeOf(false),
+	ProofsMode:      reflect.TypeOf(types.TestProofsMode),
+	PoRepProof:      reflect.TypeOf(types.PoRepProof{}),
+	PoStProof:       reflect.TypeOf(types.PoStProof{}),
+	Predicate:       reflect.TypeOf(&types.Predicate{}),
+	Parameters:      reflect.TypeOf([]interface{}{}),
+	IntSet:          reflect.TypeOf(types.IntSet{}),
+	MinerPoStStates: reflect.TypeOf(&map[string]uint64{}),
+	FaultSet:        reflect.TypeOf(types.FaultSet{}),
 }
 
 // TypeMatches returns whether or not 'val' is the go type expected for the given ABI type

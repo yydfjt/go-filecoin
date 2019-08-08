@@ -7,20 +7,25 @@ import (
 	"sync"
 	"time"
 
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	"gx/ipfs/QmNgLg1NTw37iWbYPKcyK85YJ9Whs1MkPtJwhfqbNYAyKg/go-libp2p-net"
-	pstore "gx/ipfs/QmPiemjiKBC9VA7vZF82m4x1oygtg2c2YVqag8PX7dN1BD/go-libp2p-peerstore"
-	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
-	"gx/ipfs/QmaoXrM4Z41PD48JY36YqQGKQpLGjyLA2cKcLsES7YddAq/go-libp2p-host"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	logging "github.com/ipfs/go-log"
+	"github.com/libp2p/go-libp2p-core/host"
+	net "github.com/libp2p/go-libp2p-core/network"
+	"github.com/libp2p/go-libp2p-core/peer"
+	"github.com/libp2p/go-libp2p-core/peerstore"
+	ma "github.com/multiformats/go-multiaddr"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/config"
 	"github.com/filecoin-project/go-filecoin/types"
+	"github.com/ipfs/go-cid"
 )
 
 // HeartbeatProtocol is the libp2p protocol used for the heartbeat service
-const HeartbeatProtocol = "fil/heartbeat/1.0.0"
+const (
+	HeartbeatProtocol = "fil/heartbeat/1.0.0"
+	// Minutes to wait before logging connection failure at ERROR level
+	connectionFailureErrorLogPeriodMinutes = 10 * time.Minute
+)
 
 var log = logging.Logger("metrics")
 
@@ -40,15 +45,19 @@ type Heartbeat struct {
 
 	// Address of this node's active miner. Can be empty - will return the zero address
 	MinerAddress address.Address
+
+	// CID of this chain's genesis block.
+	GenesisCID cid.Cid
 }
 
 // HeartbeatService is responsible for sending heartbeats.
 type HeartbeatService struct {
-	Host   host.Host
-	Config *config.HeartbeatConfig
+	Host       host.Host
+	GenesisCID cid.Cid
+	Config     *config.HeartbeatConfig
 
 	// A function that returns the heaviest tipset
-	HeadGetter func() types.TipSet
+	HeadGetter func() (types.TipSet, error)
 
 	// A function that returns the miner's address
 	MinerAddressGetter func() address.Address
@@ -68,13 +77,14 @@ func WithMinerAddressGetter(ag func() address.Address) HeartbeatServiceOption {
 }
 
 func defaultMinerAddressGetter() address.Address {
-	return address.Address{}
+	return address.Undef
 }
 
 // NewHeartbeatService returns a HeartbeatService
-func NewHeartbeatService(h host.Host, hbc *config.HeartbeatConfig, hg func() types.TipSet, options ...HeartbeatServiceOption) *HeartbeatService {
+func NewHeartbeatService(h host.Host, genesisCID cid.Cid, hbc *config.HeartbeatConfig, hg func() (types.TipSet, error), options ...HeartbeatServiceOption) *HeartbeatService {
 	srv := &HeartbeatService{
 		Host:               h,
+		GenesisCID:         genesisCID,
 		Config:             hbc,
 		HeadGetter:         hg,
 		MinerAddressGetter: defaultMinerAddressGetter,
@@ -118,16 +128,35 @@ func (hbs *HeartbeatService) Start(ctx context.Context) {
 
 	reconTicker := time.NewTicker(rd)
 	defer reconTicker.Stop()
+	// Timestamp of the first connection failure since the last successful connection.
+	// Zero initially and while connected.
+	var failedAt time.Time
+	// Timestamp of the last ERROR log (or of failure, before the first ERROR log).
+	var erroredAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-reconTicker.C:
 			if err := hbs.Connect(ctx); err != nil {
-				log.Debugf("Heartbeat service failed to connect: %s", err)
+				// Logs once as a warning immediately on failure, then as error every 10 minutes.
+				now := time.Now()
+				logfn := log.Debugf
+				if failedAt.IsZero() { // First failure since connection
+					failedAt = now
+					erroredAt = failedAt // Start the timer on raising to ERROR level
+					logfn = log.Warningf
+				} else if now.Sub(erroredAt) > connectionFailureErrorLogPeriodMinutes {
+					logfn = log.Errorf
+					erroredAt = now // Reset the timer
+				}
+				failureDuration := now.Sub(failedAt)
+				logfn("Heartbeat service failed to connect for %s: %s", failureDuration, err)
 				// failed to connect, continue reconnect loop
 				continue
 			}
+			failedAt = time.Time{}
+
 			// we connected, send heartbeats!
 			// Run will block until it fails to send a heartbeat.
 			if err := hbs.Run(ctx); err != nil {
@@ -158,7 +187,7 @@ func (hbs *HeartbeatService) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-beatTicker.C:
-			hb := hbs.Beat()
+			hb := hbs.Beat(ctx)
 			if err := encoder.Encode(hb); err != nil {
 				hbs.stream.Conn().Close() // nolint: errcheck
 				return err
@@ -168,10 +197,13 @@ func (hbs *HeartbeatService) Run(ctx context.Context) error {
 }
 
 // Beat will create a heartbeat.
-func (hbs *HeartbeatService) Beat() Heartbeat {
+func (hbs *HeartbeatService) Beat(ctx context.Context) Heartbeat {
 	nick := hbs.Config.Nickname
-	ts := hbs.HeadGetter()
-	tipset := ts.ToSortedCidSet().String()
+	ts, err := hbs.HeadGetter()
+	if err != nil {
+		log.Errorf("unable to fetch chain head: %s", err)
+	}
+	tipset := ts.Key().String()
 	height, err := ts.Height()
 	if err != nil {
 		log.Warningf("heartbeat service failed to get chain height: %s", err)
@@ -179,6 +211,7 @@ func (hbs *HeartbeatService) Beat() Heartbeat {
 	addr := hbs.MinerAddressGetter()
 	return Heartbeat{
 		Head:         tipset,
+		GenesisCID:   hbs.GenesisCID,
 		Height:       height,
 		Nickname:     nick,
 		MinerAddress: addr,
@@ -209,11 +242,11 @@ func (hbs *HeartbeatService) Connect(ctx context.Context) error {
 		fmt.Sprintf("/p2p/%s", peer.IDB58Encode(peerid)))
 	targetAddr := targetMaddr.Decapsulate(targetPeerAddr)
 
-	hbs.Host.Peerstore().AddAddr(peerid, targetAddr, pstore.PermanentAddrTTL)
+	hbs.Host.Peerstore().AddAddr(peerid, targetAddr, peerstore.PermanentAddrTTL)
 
 	s, err := hbs.Host.NewStream(ctx, peerid, HeartbeatProtocol)
 	if err != nil {
-		log.Errorf("failed to open stream, peerID: %s, targetAddr: %s %s", peerid, targetAddr, err)
+		log.Debugf("failed to open stream, peerID: %s, targetAddr: %s %s", peerid, targetAddr, err)
 		return err
 	}
 	log.Infof("successfully to open stream, peerID: %s, targetAddr: %s", peerid, targetAddr)

@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	gobuild "go/build"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/filecoin-project/go-filecoin/util/version"
 )
@@ -21,6 +22,11 @@ func init() {
 	log.SetFlags(0)
 	if runtime.GOOS == "windows" {
 		lineBreak = "\r\n"
+	}
+	// We build with go modules.
+	if err := os.Setenv("GO111MODULE", "on"); err != nil {
+		fmt.Println("Failed to set GO111MODULE env")
+		os.Exit(1)
 	}
 }
 
@@ -102,16 +108,6 @@ func runCapture(name string) string {
 	return strings.Trim(string(output), lineBreak)
 }
 
-// hydrateParamCache hydrates the groth parameter cache used when sealing a
-// sector to ensure consistent test runs. If the cache is hydrated lazily (the
-// first time that seal runs), a test could take longer than expected and time
-// out.
-func hydrateParamCache() []command {
-	return []command{
-		cmd("./proofs/bin/paramcache"),
-	}
-}
-
 // deps installs all dependencies
 func deps() {
 	runCmd(cmd("pkg-config --version"))
@@ -119,29 +115,17 @@ func deps() {
 	log.Println("Installing dependencies...")
 
 	cmds := []command{
-		cmd("go get -u github.com/whyrusleeping/gx"),
-		cmd("go get -u github.com/whyrusleeping/gx-go"),
-		cmd("gx install"),
-		cmd("gx-go rewrite"),
-		cmd("go get -u github.com/alecthomas/gometalinter"),
-		cmd("gometalinter --install"),
-		cmd("go get -u github.com/stretchr/testify"),
-		cmd("go get -u github.com/xeipuuv/gojsonschema"),
-		cmd("go get -u github.com/ipfs/iptb"),
-		cmd("go get -u github.com/docker/docker/api/types"),
-		cmd("go get -u github.com/docker/docker/api/types/container"),
-		cmd("go get -u github.com/docker/docker/client"),
-		cmd("go get -u github.com/docker/docker/pkg/stdcopy"),
-		cmd("go get -u github.com/ipsn/go-secp256k1"),
-		cmd("go get -u github.com/json-iterator/go"),
-		cmd("go get -u github.com/prometheus/client_golang/prometheus"),
-		cmd("go get -u github.com/prometheus/client_golang/prometheus/promhttp"),
-		cmd("go get -u github.com/jstemmer/go-junit-report"),
-		cmd("go get -u github.com/pmezard/go-difflib/difflib"),
-		cmd("./scripts/install-rust-proofs.sh"),
+		// Download all go modules. While not strictly necessary (go
+		// will do this automatically), this:
+		//  1. Makes it easier to cache dependencies in CI.
+		//  2. Makes it possible to fetch all deps ahead of time for
+		//     offline development.
+		cmd("go mod download"),
+		// Download and build proofs.
+		cmd("./scripts/install-rust-fil-proofs.sh"),
+		cmd("./scripts/install-rust-fil-sector-builder.sh"),
 		cmd("./scripts/install-bls-signatures.sh"),
-		cmd("./proofs/bin/paramcache"),
-		cmd("./scripts/copy-groth-params.sh"),
+		cmd("./scripts/install-filecoin-parameters.sh"),
 	}
 
 	for _, c := range cmds {
@@ -149,78 +133,7 @@ func deps() {
 	}
 }
 
-// smartdeps avoids fetching from the network
-func smartdeps() {
-	runCmd(cmd("pkg-config --version"))
-
-	log.Println("Installing dependencies...")
-
-	// commands we need to run
-	cmds := []command{
-		cmd("gx install"),
-		cmd("gx-go rewrite"),
-		cmd("gometalinter --install"),
-		cmd("./scripts/install-rust-proofs.sh"),
-		cmd("./scripts/install-bls-signatures.sh"),
-	}
-
-	cmds = append(cmds, hydrateParamCache()...)
-
-	// packages we need to install
-	pkgs := []string{
-		"github.com/alecthomas/gometalinter",
-		"github.com/docker/docker/api/types",
-		"github.com/docker/docker/api/types/container",
-		"github.com/docker/docker/client",
-		"github.com/docker/docker/pkg/stdcopy",
-		"github.com/ipfs/iptb",
-		"github.com/stretchr/testify",
-		"github.com/whyrusleeping/gx",
-		"github.com/whyrusleeping/gx-go",
-		"github.com/xeipuuv/gojsonschema",
-		"github.com/json-iterator/go",
-		"github.com/ipsn/go-secp256k1",
-		"github.com/prometheus/client_golang/prometheus/promhttp",
-		"github.com/prometheus/client_golang/prometheus",
-		"github.com/jstemmer/go-junit-report",
-		"github.com/pmezard/go-difflib/difflib",
-	}
-
-	gopath := os.Getenv("GOPATH")
-	if gopath == "" {
-		gopath = gobuild.Default.GOPATH
-	}
-
-	gpbin := filepath.Join(gopath, "bin")
-	var gopathBinFound bool
-	for _, s := range strings.Split(os.Getenv("PATH"), ":") {
-		if s == gpbin {
-			gopathBinFound = true
-		}
-	}
-
-	if !gopathBinFound {
-		fmt.Println("'$GOPATH/bin' is not in your $PATH.")
-		fmt.Println("See https://golang.org/doc/code.html#GOPATH for more information.")
-		return
-	}
-
-	// if the package exists locally install it, else fetch it
-	for _, pkg := range pkgs {
-		pkgpath := filepath.Join(gopath, "src", pkg)
-		if _, err := os.Stat(pkgpath); os.IsNotExist(err) {
-			runCmd(cmd(fmt.Sprintf("go get %s", pkg)))
-		} else {
-			runCmd(cmd(fmt.Sprintf("go install %s", pkg)))
-		}
-	}
-
-	for _, c := range cmds {
-		runCmd(c)
-	}
-}
-
-// lint runs linting using gometalinter
+// lint runs linting using golangci-lint
 func lint(packages ...string) {
 	if len(packages) == 0 {
 		packages = []string{"./..."}
@@ -228,36 +141,7 @@ func lint(packages ...string) {
 
 	log.Printf("Linting %s ...\n", strings.Join(packages, " "))
 
-	// Run fast linters batched together
-	configs := []string{
-		"gometalinter",
-		"--skip=sharness",
-		"--skip=vendor",
-		"--disable-all",
-	}
-
-	fastLinters := []string{
-		"--enable=vet",
-		"--enable=gofmt",
-		"--enable=misspell",
-		"--enable=goconst",
-		"--enable=golint",
-		"--enable=errcheck",
-		"--min-occurrences=6", // for goconst
-	}
-
-	runCmd(cmd(append(append(configs, fastLinters...), packages...)...))
-
-	slowLinters := []string{
-		"--deadline=10m",
-		"--enable=unconvert",
-		"--enable=staticcheck",
-		"--enable=varcheck",
-		"--enable=structcheck",
-		"--enable=deadcode",
-	}
-
-	runCmd(cmd(append(append(configs, slowLinters...), packages...)...))
+	runCmd(cmd("go", "run", "github.com/golangci/golangci-lint/cmd/golangci-lint", "run"))
 }
 
 func build() {
@@ -266,27 +150,106 @@ func build() {
 	buildFaucet()
 	buildGenesisFileServer()
 	generateGenesis()
+	buildMigrations()
+	buildPrereleaseTool()
+}
+
+func forcebuild() {
+	forceBuildFC()
+	buildGengen()
+	buildFaucet()
+	buildGenesisFileServer()
+	generateGenesis()
+	buildMigrations()
+	buildPrereleaseTool()
+}
+
+func forceBuildFC() {
+	log.Println("Force building go-filecoin...")
+
+	runCmd(cmd([]string{
+		"go", "build",
+		"-ldflags", fmt.Sprintf("-X github.com/filecoin-project/go-filecoin/flags.Commit=%s", getCommitSha()),
+		"-a", "-v", "-o", "go-filecoin", ".",
+	}...))
+}
+
+// cleanDirectory removes the child of a directly wihtout removing the directory itself, unlike `RemoveAll`.
+// There is also an additional parameter to ignore dot files which is important for directories which are normally
+// empty. Git has no concept of directories, so for a directory to automatically be created on checkout, a file must
+// exist in side of it. We use this pattern in a few places, so the need to keep the dot files around is impotant.
+func cleanDirectory(dir string, ignoredots bool) error {
+	if abs := filepath.IsAbs(dir); !abs {
+		return fmt.Errorf("Directory %s is not an absolute path, could not clean directory", dir)
+	}
+
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		fname := file.Name()
+		if ignoredots && []rune(fname)[0] == '.' {
+			continue
+		}
+
+		fpath := filepath.Join(dir, fname)
+
+		fmt.Println("Removing", fpath)
+		if err := os.RemoveAll(fpath); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func generateGenesis() {
 	log.Println("Generating genesis...")
+
+	liveFixtures, err := filepath.Abs("./fixtures/live")
+	if err != nil {
+		panic(err)
+	}
+
+	if err := cleanDirectory(liveFixtures, true); err != nil {
+		panic(err)
+	}
+
 	runCmd(cmd([]string{
 		"./gengen/gengen",
-		"--keypath", "fixtures",
-		"--out-car", "fixtures/genesis.car",
-		"--out-json", "fixtures/gen.json",
+		"--keypath", liveFixtures,
+		"--out-car", filepath.Join(liveFixtures, "genesis.car"),
+		"--out-json", filepath.Join(liveFixtures, "gen.json"),
 		"--config", "./fixtures/setup.json",
+	}...))
+
+	testFixtures, err := filepath.Abs("./fixtures/test")
+	if err != nil {
+		panic(err)
+	}
+
+	if err := cleanDirectory(testFixtures, true); err != nil {
+		panic(err)
+	}
+
+	runCmd(cmd([]string{
+		"./gengen/gengen",
+		"--keypath", testFixtures,
+		"--out-car", filepath.Join(testFixtures, "genesis.car"),
+		"--out-json", filepath.Join(testFixtures, "gen.json"),
+		"--config", "./fixtures/setup.json",
+		"--test-proofs-mode",
 	}...))
 }
 
 func buildFilecoin() {
 	log.Println("Building go-filecoin...")
 
-	commit := runCapture("git log -n 1 --format=%H")
-
 	runCmd(cmd([]string{
 		"go", "build",
-		"-ldflags", fmt.Sprintf("-X github.com/filecoin-project/go-filecoin/flags.Commit=%s", commit),
+		"-ldflags", fmt.Sprintf("-X github.com/filecoin-project/go-filecoin/flags.Commit=%s", getCommitSha()),
 		"-v", "-o", "go-filecoin", ".",
 	}...))
 }
@@ -309,17 +272,39 @@ func buildGenesisFileServer() {
 	runCmd(cmd([]string{"go", "build", "-o", "./tools/genesis-file-server/genesis-file-server", "./tools/genesis-file-server/"}...))
 }
 
+func buildMigrations() {
+	log.Println("Building migrations...")
+	runCmd(cmd([]string{
+		"go", "build", "-o", "./tools/migration/go-filecoin-migrate", "./tools/migration/main.go"}...))
+}
+
+func buildPrereleaseTool() {
+	log.Println("Building prerelease-tool...")
+
+	runCmd(cmd([]string{"go", "build", "-o", "./tools/prerelease-tool/prerelease-tool", "./tools/prerelease-tool/"}...))
+}
+
 func install() {
 	log.Println("Installing...")
 
-	runCmd(cmd("go install"))
+	runCmd(cmd("go", "install", "-ldflags", fmt.Sprintf("-X github.com/filecoin-project/go-filecoin/flags.Commit=%s", getCommitSha())))
 }
 
 // test executes tests and passes along all additional arguments to `go test`.
-func test(args ...string) {
-	log.Println("Testing...")
+func test(userArgs ...string) {
+	log.Println("Running tests...")
 
-	runCmd(cmd(fmt.Sprintf("go test -timeout 30m -parallel 8 ./... %s", strings.Join(args, " "))))
+	// Consult environment for test packages, in order to support CI container-level parallelism.
+	packages, ok := os.LookupEnv("TEST_PACKAGES")
+	if !ok {
+		packages = "./..."
+	}
+
+	begin := time.Now()
+	runCmd(cmd(fmt.Sprintf("go test %s %s",
+		strings.Replace(packages, "\n", " ", -1), strings.Join(userArgs, " "))))
+	end := time.Now()
+	log.Printf("Tests finished in %.1f seconds\n", end.Sub(begin).Seconds())
 }
 
 func main() {
@@ -336,10 +321,8 @@ func main() {
 	cmd := args[0]
 
 	switch cmd {
-	case "deps":
+	case "deps", "smartdeps":
 		deps()
-	case "smartdeps":
-		smartdeps()
 	case "lint":
 		lint(args[1:]...)
 	case "build-filecoin":
@@ -348,8 +331,12 @@ func main() {
 		buildGengen()
 	case "generate-genesis":
 		generateGenesis()
+	case "build-migrations":
+		buildMigrations()
 	case "build":
 		build()
+	case "fbuild":
+		forcebuild()
 	case "test":
 		test(args[1:]...)
 	case "install":
@@ -365,4 +352,12 @@ func main() {
 	default:
 		log.Fatalf("Unknown command: %s\n", cmd)
 	}
+}
+
+func getCommitSha() string {
+	commit := runCapture("git log -n 1 --format=%H")
+	if os.Getenv("FILECOIN_OVERRIDE_BUILD_SHA") != "" {
+		commit = os.Getenv("FILECOIN_OVERRIDE_BUILD_SHA")
+	}
+	return commit
 }

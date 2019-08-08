@@ -1,14 +1,14 @@
 package repo
 
 import (
-	"gx/ipfs/QmZxaF6uz9VWbuQ5Jk43stXksbnX8x5veYS73eFD4hKqtD/go-ipfs-keystore"
-	"gx/ipfs/Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM/go-datastore"
+	"github.com/ipfs/go-datastore"
+	keystore "github.com/ipfs/go-ipfs-keystore"
 
 	"github.com/filecoin-project/go-filecoin/config"
 )
 
-// Version is the current repo version that we require for a valid repo.
-const Version uint = 1
+// Version is the version of repo schema that this code understands.
+const Version uint = 2
 
 // Datastore is the datastore interface provided by the repo
 type Datastore interface {
@@ -16,7 +16,6 @@ type Datastore interface {
 	// can either force it, or just do hopeful type checks. Not all datastores
 	// implement every feature.
 	datastore.Batching
-	Close() error
 }
 
 // Repo is a representation of all persistent data in a filecoin node.
@@ -44,13 +43,12 @@ type Repo interface {
 	// APIAddr returns the address of the running API.
 	APIAddr() (string, error)
 
+	// Version returns the current repo version.
 	Version() uint
 
-	// StagingDir is used to store staged sectors.
-	StagingDir() string
+	// Path returns the repo path.
+	Path() (string, error)
 
-	// SealedDir is used to store sealed sectors.
-	SealedDir() string
-
+	// Close shuts down the repo.
 	Close() error
 }

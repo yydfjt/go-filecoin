@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"math/big"
 
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
-	"gx/ipfs/QmSKyB5faguXT4NqbrXpnRXqaVj5DhSm7x9BtzFydBY1UK/go-leb128"
-	"gx/ipfs/QmfWqohMtbivn5NRJvtrLzCW3EU4QmoLvVNtmvo9vbdtVA/refmt/obj/atlas"
+	"github.com/filecoin-project/go-leb128"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/polydawn/refmt/obj/atlas"
 )
 
 func init() {

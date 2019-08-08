@@ -37,22 +37,20 @@ import (
 	"sync"
 	"time"
 
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
+	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
 // Scheduler is the mining interface consumers use. When you Start() the
-// scheduler it returns two channels (inCh, outCh) and a sync.WaitGroup:
-//   - inCh: the caller sends Inputs to mine on to this channel.
-//   - outCh: the scheduler sends Outputs to the caller on this channel.
-//   - doneWg: signals that the scheduler and any goroutines it launched
+// scheduler it returns a channel and a sync.WaitGroup:
+//   - channel: the scheduler emits outputs (mined blocks) to the caller on this channel
+//   - waitgroup: signals that the scheduler and any goroutines it launched
 //             have stopped. (Context cancelation happens async, so you
 //             need some way to know when it has actually stopped.)
 //
-// Once Start()ed, the Scheduler can be stopped by canceling its miningCtx,
-// which will signal on doneWg when it's actually done. Canceling miningCtx
-// cancels any run in progress and shuts the scheduler down.
+// Once started, a scheduler can be stopped by canceling the context provided to `Start()`,
+// which will signal on the waitgroup when it's actually done.
 type Scheduler interface {
 	Start(miningCtx context.Context) (<-chan Output, *sync.WaitGroup)
 	IsStarted() bool
@@ -65,7 +63,7 @@ type timingScheduler struct {
 	mineDelay time.Duration
 	// pollHeadFunc is the function the scheduler uses to poll for the
 	// current heaviest tipset
-	pollHeadFunc func() types.TipSet
+	pollHeadFunc func() (types.TipSet, error)
 
 	isStarted bool
 }
@@ -109,8 +107,8 @@ func (s *timingScheduler) Start(miningCtx context.Context) (<-chan Output, *sync
 			// This is the sleep during which we collect. TODO: maybe this should vary?
 			time.Sleep(s.mineDelay)
 			// Ask for the heaviest tipset.
-			base := s.pollHeadFunc()
-			if base == nil { // Don't try to mine on an unset head.
+			base, _ := s.pollHeadFunc()
+			if !base.Defined() { // Don't try to mine on an unset head.
 				outCh <- NewOutput(nil, errors.New("cannot mine on unset (nil) head"))
 				return
 			}
@@ -152,7 +150,7 @@ func (s *timingScheduler) IsStarted() bool {
 // previous number of null blocks mined on the previous base, prevNullBlkCount.
 func nextNullBlkCount(prevNullBlkCount int, prevBase, currBase types.TipSet) int {
 	// We haven't mined on this base before, start with 0 null blocks.
-	if prevBase == nil {
+	if !prevBase.Defined() {
 		return 0
 	}
 	if prevBase.String() != currBase.String() {
@@ -164,7 +162,7 @@ func nextNullBlkCount(prevNullBlkCount int, prevBase, currBase types.TipSet) int
 
 // NewScheduler returns a new timingScheduler to schedule mining work on the
 // input worker.
-func NewScheduler(w Worker, md time.Duration, f func() types.TipSet) Scheduler {
+func NewScheduler(w Worker, md time.Duration, f func() (types.TipSet, error)) Scheduler {
 	return &timingScheduler{worker: w, mineDelay: md, pollHeadFunc: f}
 }
 
@@ -175,8 +173,8 @@ func NewScheduler(w Worker, md time.Duration, f func() types.TipSet) Scheduler {
 // Then the scheduler takes this polling function, and the worker and the
 // mining duration
 func MineOnce(ctx context.Context, w Worker, md time.Duration, ts types.TipSet) (Output, error) {
-	pollHeadFunc := func() types.TipSet {
-		return ts
+	pollHeadFunc := func() (types.TipSet, error) {
+		return ts, nil
 	}
 	s := NewScheduler(w, md, pollHeadFunc)
 	subCtx, subCtxCancel := context.WithCancel(ctx)

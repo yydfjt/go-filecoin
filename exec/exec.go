@@ -3,11 +3,12 @@ package exec
 import (
 	"context"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-hamt-ipld"
 
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/proofs/verification"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm/errors"
 )
@@ -69,22 +70,21 @@ type FunctionSignature struct {
 type VMContext interface {
 	Message() *types.Message
 	Storage() Storage
-	Send(to address.Address, method string, value *types.AttoFIL, params []interface{}) ([][]byte, uint8, error)
+	Send(to address.Address, method string, value types.AttoFIL, params []interface{}) ([][]byte, uint8, error)
 	AddressForNewActor() (address.Address, error)
 	BlockHeight() *types.BlockHeight
+	MyBalance() types.AttoFIL
 	IsFromAccountActor() bool
 	Charge(cost types.GasUnits) error
+	SampleChainRandomness(sampleHeight *types.BlockHeight) ([]byte, error)
 
 	CreateNewActor(addr address.Address, code cid.Cid, initalizationParams interface{}) error
 
-	// TODO: Remove these when Storage above is completely implemented
-	ReadStorage() ([]byte, error)
-	WriteStorage(interface{}) error
+	Verifier() verification.Verifier
 }
 
 // Storage defines the storage module exposed to actors.
 type Storage interface {
-	// TODO: Forgot that Put() can fail in the spec, need to update.
 	Put(interface{}) (cid.Cid, error)
 	Get(cid.Cid) ([]byte, error)
 	Commit(cid.Cid, cid.Cid) error

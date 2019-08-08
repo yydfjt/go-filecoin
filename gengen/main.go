@@ -2,12 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
+	flg "flag"
 	"fmt"
 	"os"
 	"time"
 
-	gengen "github.com/filecoin-project/go-filecoin/gengen/util"
+	"github.com/filecoin-project/go-filecoin/commands"
+	"github.com/filecoin-project/go-filecoin/gengen/util"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
@@ -26,7 +27,10 @@ func writeKey(ki *types.KeyInfo, name string, jsonout bool) error {
 	}
 	defer fi.Close() // nolint: errcheck
 
-	return json.NewEncoder(fi).Encode(ki)
+	var wir commands.WalletSerializeResult
+	wir.KeyInfo = append(wir.KeyInfo, ki)
+
+	return json.NewEncoder(fi).Encode(wir)
 }
 
 /* gengen takes as input a json encoded 'Genesis Config'
@@ -56,17 +60,24 @@ The outputted file can be used by go-filecoin during init to
 set the initial genesis block:
 $ go-filecoin init --genesisfile=genesis.car
 */
+
+var (
+	flag = flg.NewFlagSet(os.Args[0], flg.ExitOnError)
+)
+
 func main() {
 	var defaultSeed = time.Now().Unix()
 
 	jsonout := flag.Bool("json", false, "sets output to be json")
+	testProofsMode := flag.Bool("test-proofs-mode", false, "change sealing, sector packing, PoSt, etc. to be compatible with test environments (overrides proofs mode read from JSON)")
 	keypath := flag.String("keypath", ".", "sets location to write key files to")
 	outJSON := flag.String("out-json", "", "enables json output and writes it to the given file")
 	outCar := flag.String("out-car", "", "writes the generated car file to the give path, instead of stdout")
 	configFilePath := flag.String("config", "", "reads configuration from this json file, instead of stdin")
 	seed := flag.Int64("seed", defaultSeed, "provides the seed for randomization, defaults to current unix epoch")
 
-	flag.Parse()
+	// ExitOnError is set
+	flag.Parse(os.Args[1:]) // nolint: errcheck
 
 	jsonEnabled := *jsonout || *outJSON != ""
 
@@ -74,6 +85,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	gengen.ApplyProofsModeDefaults(cfg, !*testProofsMode, isFlagPassed("test-proofs-mode"))
 
 	outfile := os.Stdout
 	if *outCar != "" {
@@ -83,6 +96,7 @@ func main() {
 		}
 		outfile = f
 	}
+
 	info, err := gengen.GenGenesisCar(cfg, outfile, *seed)
 	if err != nil {
 		fmt.Println("ERROR", err)
@@ -118,7 +132,7 @@ func main() {
 	}
 
 	for _, m := range info.Miners {
-		fmt.Fprintf(os.Stderr, "created miner %s, owned by %d, power = %d\n", m.Address, m.Owner, m.Power) // nolint: errcheck
+		fmt.Fprintf(os.Stderr, "created miner %s, owned by %d, power = %s\n", m.Address, m.Owner, m.Power) // nolint: errcheck
 	}
 }
 
@@ -138,4 +152,17 @@ func readConfig(filePath string) (*gengen.GenesisCfg, error) {
 	}
 
 	return &cfg, nil
+}
+
+// isFlagPassed returns true if a flag with the given name was provided by the
+// caller.
+func isFlagPassed(name string) bool {
+	found := false
+	flag.Visit(func(f *flg.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+
+	return found
 }

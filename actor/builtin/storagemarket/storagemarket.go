@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"math/big"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
-	"gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-hamt-ipld"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	"github.com/libp2p/go-libp2p-core/peer"
 
 	"github.com/filecoin-project/go-filecoin/abi"
 	"github.com/filecoin-project/go-filecoin/actor"
@@ -19,26 +19,17 @@ import (
 	"github.com/filecoin-project/go-filecoin/vm/errors"
 )
 
-// MinimumPledge is the minimum amount of sectors a user can pledge.
-var MinimumPledge = big.NewInt(10)
-
-// MinimumCollateralPerSector is the minimum amount of collateral required per sector
-var MinimumCollateralPerSector, _ = types.NewAttoFILFromFILString("0.001")
-
 const (
-	// ErrPledgeTooLow is the error code for a pledge under the MinimumPledge.
-	ErrPledgeTooLow = 33
 	// ErrUnknownMiner indicates a pledge under the MinimumPledge.
 	ErrUnknownMiner = 34
-	// ErrInsufficientCollateral indicates the collateral is too low.
-	ErrInsufficientCollateral = 43
+	// ErrUnsupportedSectorSize indicates that the sector size is incompatible with the proofs mode.
+	ErrUnsupportedSectorSize = 44
 )
 
 // Errors map error codes to revert errors this actor may return.
 var Errors = map[uint8]error{
-	ErrPledgeTooLow:           errors.NewCodedRevertErrorf(ErrPledgeTooLow, "pledge must be at least %s sectors", MinimumPledge),
-	ErrUnknownMiner:           errors.NewCodedRevertErrorf(ErrUnknownMiner, "unknown miner"),
-	ErrInsufficientCollateral: errors.NewCodedRevertErrorf(ErrInsufficientCollateral, "collateral must be more than %s FIL per sector", MinimumCollateralPerSector),
+	ErrUnknownMiner:          errors.NewCodedRevertErrorf(ErrUnknownMiner, "unknown miner"),
+	ErrUnsupportedSectorSize: errors.NewCodedRevertErrorf(ErrUnsupportedSectorSize, "sector size is not supported"),
 }
 
 func init() {
@@ -54,20 +45,28 @@ type Actor struct{}
 type State struct {
 	Miners cid.Cid `refmt:",omitempty"`
 
-	// TotalCommitedStorage is the number of sectors that are currently committed
-	// in the whole network.
-	TotalCommittedStorage *big.Int
+	// TODO: Determine correct unit of measure. Could be denominated in the
+	// smallest sector size supported by the network.
+	//
+	// See: https://github.com/filecoin-project/specs/issues/6
+	//
+	TotalCommittedStorage *types.BytesAmount
+
+	ProofsMode types.ProofsMode
 }
 
 // NewActor returns a new storage market actor.
-func NewActor() (*actor.Actor, error) {
-	return actor.NewActor(types.StorageMarketActorCodeCid, types.NewZeroAttoFIL()), nil
+func NewActor() *actor.Actor {
+	return actor.NewActor(types.StorageMarketActorCodeCid, types.ZeroAttoFIL)
 }
 
 // InitializeState stores the actor's initial data structure.
-func (sma *Actor) InitializeState(storage exec.Storage, _ interface{}) error {
+func (sma *Actor) InitializeState(storage exec.Storage, proofsModeInterface interface{}) error {
+	proofsMode := proofsModeInterface.(types.ProofsMode)
+
 	initStorage := &State{
-		TotalCommittedStorage: big.NewInt(0),
+		TotalCommittedStorage: types.NewBytesAmount(0),
+		ProofsMode:            proofsMode,
 	}
 	stateBytes, err := cbor.DumpObject(initStorage)
 	if err != nil {
@@ -90,32 +89,39 @@ func (sma *Actor) Exports() exec.Exports {
 }
 
 var storageMarketExports = exec.Exports{
-	"createMiner": &exec.FunctionSignature{
-		Params: []abi.Type{abi.Integer, abi.Bytes, abi.PeerID},
+	"createStorageMiner": &exec.FunctionSignature{
+		Params: []abi.Type{abi.BytesAmount, abi.PeerID},
 		Return: []abi.Type{abi.Address},
 	},
-	"updatePower": &exec.FunctionSignature{
-		Params: []abi.Type{abi.Integer},
+	"updateStorage": &exec.FunctionSignature{
+		Params: []abi.Type{abi.BytesAmount},
 		Return: nil,
 	},
 	"getTotalStorage": &exec.FunctionSignature{
 		Params: []abi.Type{},
-		Return: []abi.Type{abi.Integer},
+		Return: []abi.Type{abi.BytesAmount},
+	},
+	"getProofsMode": &exec.FunctionSignature{
+		Params: []abi.Type{},
+		Return: []abi.Type{abi.ProofsMode},
+	},
+	"getLateMiners": &exec.FunctionSignature{
+		Params: nil,
+		Return: []abi.Type{abi.MinerPoStStates},
 	},
 }
 
-// CreateMiner creates a new miner with the a pledge of the given amount of sectors. The
-// miners collateral is set by the value in the message.
-func (sma *Actor) CreateMiner(vmctx exec.VMContext, pledge *big.Int, publicKey []byte, pid peer.ID) (address.Address, uint8, error) {
-	if err := vmctx.Charge(100); err != nil {
-		return address.Address{}, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
+// CreateStorageMiner creates a new miner which will commit sectors of the
+// given size. The miners collateral is set by the value in the message.
+func (sma *Actor) CreateStorageMiner(vmctx exec.VMContext, sectorSize *types.BytesAmount, pid peer.ID) (address.Address, uint8, error) {
+	if err := vmctx.Charge(actor.DefaultGasCost); err != nil {
+		return address.Undef, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
 	var state State
 	ret, err := actor.WithState(vmctx, &state, func() (interface{}, error) {
-		if pledge.Cmp(MinimumPledge) < 0 {
-			// TODO This should probably return a non-zero exit code instead of an error.
-			return nil, Errors[ErrPledgeTooLow]
+		if !isSupportedSectorSize(state.ProofsMode, sectorSize) {
+			return nil, Errors[ErrUnsupportedSectorSize]
 		}
 
 		addr, err := vmctx.AddressForNewActor()
@@ -123,11 +129,7 @@ func (sma *Actor) CreateMiner(vmctx exec.VMContext, pledge *big.Int, publicKey [
 			return nil, errors.FaultErrorWrap(err, "could not get address for new actor")
 		}
 
-		if vmctx.Message().Value.LessThan(MinimumCollateral(pledge)) {
-			return nil, Errors[ErrInsufficientCollateral]
-		}
-
-		minerInitializationParams := miner.NewState(vmctx.Message().From, publicKey, pledge, pid, vmctx.Message().Value)
+		minerInitializationParams := miner.NewState(vmctx.Message().From, vmctx.Message().From, pid, sectorSize)
 
 		actorCodeCid := types.MinerActorCodeCid
 		if vmctx.BlockHeight().Equal(types.NewBlockHeight(0)) {
@@ -153,17 +155,17 @@ func (sma *Actor) CreateMiner(vmctx exec.VMContext, pledge *big.Int, publicKey [
 		return addr, nil
 	})
 	if err != nil {
-		return address.Address{}, errors.CodeError(err), err
+		return address.Undef, errors.CodeError(err), err
 	}
 
 	return ret.(address.Address), 0, nil
 }
 
-// UpdatePower is called to reflect a change in the overall power of the network.
+// UpdateStorage is called to reflect a change in the overall power of the network.
 // This occurs either when a miner adds a new commitment, or when one is removed
-// (via slashing or willful removal). The delta is in number of sectors.
-func (sma *Actor) UpdatePower(vmctx exec.VMContext, delta *big.Int) (uint8, error) {
-	if err := vmctx.Charge(100); err != nil {
+// (via slashing, faults or willful removal). The delta is in number of bytes.
+func (sma *Actor) UpdateStorage(vmctx exec.VMContext, delta *types.BytesAmount) (uint8, error) {
+	if err := vmctx.Charge(actor.DefaultGasCost); err != nil {
 		return exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -185,7 +187,7 @@ func (sma *Actor) UpdatePower(vmctx exec.VMContext, delta *big.Int) (uint8, erro
 			return nil, errors.FaultErrorWrapf(err, "could not load lookup for miner with address: %s", miner)
 		}
 
-		state.TotalCommittedStorage = state.TotalCommittedStorage.Add(state.TotalCommittedStorage, delta)
+		state.TotalCommittedStorage = state.TotalCommittedStorage.Add(delta)
 
 		return nil, nil
 	})
@@ -196,9 +198,59 @@ func (sma *Actor) UpdatePower(vmctx exec.VMContext, delta *big.Int) (uint8, erro
 	return 0, nil
 }
 
+func (sma *Actor) GetLateMiners(vmctx exec.VMContext) (*map[string]uint64, uint8, error) {
+	if err := vmctx.Charge(actor.DefaultGasCost); err != nil {
+		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
+	}
+	var state State
+	ctx := context.Background()
+
+	ret, err := actor.WithState(vmctx, &state, func() (interface{}, error) {
+		miners := map[string]uint64{}
+		lu, err := actor.LoadLookup(ctx, vmctx.Storage(), state.Miners)
+		if err != nil {
+			return &miners, err
+		}
+
+		vals, err := lu.Values(ctx)
+		if err != nil {
+			return &miners, err
+		}
+
+		for _, el := range vals {
+			addr, err := address.NewFromString(el.Key)
+			if err != nil {
+				return &miners, err
+			}
+
+			var poStState uint64
+			poStState, err = sma.getMinerPoStState(vmctx, addr)
+			if err != nil {
+				return &miners, err
+			}
+
+			if poStState > miner.PoStStateWithinProvingPeriod {
+				miners[addr.String()] = poStState
+			}
+		}
+		return &miners, nil
+	})
+
+	if err != nil {
+		return nil, errors.CodeError(err), err
+	}
+
+	res, ok := ret.(*map[string]uint64)
+	if !ok {
+		return res, 1, errors.NewFaultErrorf("expected []address.Address to be returned, but got %T instead", ret)
+	}
+
+	return res, 0, nil
+}
+
 // GetTotalStorage returns the total amount of proven storage in the system.
-func (sma *Actor) GetTotalStorage(vmctx exec.VMContext) (*big.Int, uint8, error) {
-	if err := vmctx.Charge(100); err != nil {
+func (sma *Actor) GetTotalStorage(vmctx exec.VMContext) (*types.BytesAmount, uint8, error) {
+	if err := vmctx.Charge(actor.DefaultGasCost); err != nil {
 		return nil, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
 	}
 
@@ -210,15 +262,56 @@ func (sma *Actor) GetTotalStorage(vmctx exec.VMContext) (*big.Int, uint8, error)
 		return nil, errors.CodeError(err), err
 	}
 
-	count, ok := ret.(*big.Int)
+	amt, ok := ret.(*types.BytesAmount)
 	if !ok {
 		return nil, 1, fmt.Errorf("expected *big.Int to be returned, but got %T instead", ret)
 	}
 
-	return count, 0, nil
+	return amt, 0, nil
 }
 
-// MinimumCollateral returns the minimum required amount of collateral for a given pledge
-func MinimumCollateral(sectors *big.Int) *types.AttoFIL {
-	return MinimumCollateralPerSector.MulBigInt(sectors)
+// GetSectorSize returns the sector size of the block chain
+func (sma *Actor) GetProofsMode(vmctx exec.VMContext) (types.ProofsMode, uint8, error) {
+	if err := vmctx.Charge(actor.DefaultGasCost); err != nil {
+		return 0, exec.ErrInsufficientGas, errors.RevertErrorWrap(err, "Insufficient gas")
+	}
+
+	var state State
+	ret, err := actor.WithState(vmctx, &state, func() (interface{}, error) {
+		return state.ProofsMode, nil
+	})
+	if err != nil {
+		return 0, errors.CodeError(err), err
+	}
+
+	size, ok := ret.(types.ProofsMode)
+	if !ok {
+		return 0, 1, fmt.Errorf("expected types.ProofsMode to be returned, but got %T instead", ret)
+	}
+
+	return size, 0, nil
+}
+
+func (sma *Actor) getMinerPoStState(vmctx exec.VMContext, minerAddr address.Address) (uint64, error) {
+	msgResult, _, err := vmctx.Send(minerAddr, "getPoStState", types.ZeroAttoFIL, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	res, err := abi.Deserialize(msgResult[0], abi.Integer)
+	if err != nil {
+		return 0, err
+	}
+	resbi := res.Val.(*big.Int)
+	return resbi.Uint64(), nil
+}
+
+// isSupportedSectorSize produces a boolean indicating whether or not the
+// provided sector size is valid given the network's proofs mode.
+func isSupportedSectorSize(mode types.ProofsMode, sectorSize *types.BytesAmount) bool {
+	if mode == types.TestProofsMode {
+		return sectorSize.Equal(types.OneKiBSectorSize)
+	} else {
+		return sectorSize.Equal(types.TwoHundredFiftySixMiBSectorSize)
+	}
 }

@@ -1,5 +1,8 @@
 package consensus
 
+// This is to implement Expected Consensus protocol
+// See: https://github.com/filecoin-project/specs/blob/master/expected-consensus.md
+
 import (
 	"bytes"
 	"context"
@@ -7,18 +10,21 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
-	"gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	"gx/ipfs/QmRXf2uUSdGSunRJsM9wXSUNVwLUGCY3So5fAs7h2CBJVf/go-hamt-ipld"
-	"gx/ipfs/QmS2aqUZLJp8kF1ihE5rvDGE5LvmKDPnx32w9Z1BW9xLV5/go-ipfs-blockstore"
-	"gx/ipfs/QmVmDhyTTUcQXFD1rRQ64fGLMSAoaQvNH3hwuaCFAPq2hy/errors"
-	"gx/ipfs/QmcTzQXRcU2vf8yX5EEboz1BSvWC7wWmeYAKVQmhp8WZYU/sha256-simd"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-hamt-ipld"
+	"github.com/ipfs/go-ipfs-blockstore"
+	logging "github.com/ipfs/go-log"
+	"github.com/minio/sha256-simd"
+	"github.com/pkg/errors"
+	"go.opencensus.io/trace"
 
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
 	"github.com/filecoin-project/go-filecoin/actor/builtin/miner"
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/proofs"
+	"github.com/filecoin-project/go-filecoin/metrics/tracing"
+	"github.com/filecoin-project/go-filecoin/proofs/verification"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/vm"
@@ -31,7 +37,9 @@ var (
 
 func init() {
 	ticketDomain = &big.Int{}
-	ticketDomain.Exp(big.NewInt(2), big.NewInt(256), nil)
+	// The size of the ticket domain must equal the size of the Signature (ticket) generated.
+	// Currently this is a secp256k1.Sign signature, which is 65 bytes.
+	ticketDomain.Exp(big.NewInt(2), big.NewInt(65*8), nil)
 	ticketDomain.Sub(ticketDomain, big.NewInt(1))
 }
 
@@ -44,6 +52,17 @@ var (
 	ErrUnorderedTipSets = errors.New("trying to order two identical tipsets")
 )
 
+// TicketSigner is an interface for a test signer that can create tickets.
+type TicketSigner interface {
+	GetAddressForPubKey(pk []byte) (address.Address, error)
+	SignBytes(data []byte, signerAddr address.Address) (types.Signature, error)
+}
+
+// DefaultBlockTime is the estimated proving period time.
+// We define this so that we can fake mining in the current incomplete system.
+// We also use this to enforce a soft block validation.
+const DefaultBlockTime = 30 * time.Second
+
 // TODO none of these parameters are chosen correctly
 // with respect to analysis under a security model:
 // https://github.com/filecoin-project/go-filecoin/issues/1846
@@ -54,21 +73,21 @@ const ECV uint64 = 10
 // ECPrM is the power ratio magnitude defined in the EC spec.
 const ECPrM uint64 = 100
 
-// LookBackParameter is the protocol parameter defining how many blocks in the
-// past to look back to sample randomness values.
-const LookBackParameter = 3
-
 // AncestorRoundsNeeded is the number of rounds of the ancestor chain needed
 // to process all state transitions.
-var AncestorRoundsNeeded = miner.ProvingPeriodBlocks.Add(miner.GracePeriodBlocks)
+//
+// TODO: If the following PR is merged - and the network doesn't define a
+// largest sector size - this constant will need to be reconsidered.
+// https://github.com/filecoin-project/specs/pull/318
+const AncestorRoundsNeeded = miner.LargestSectorSizeProvingPeriodBlocks + miner.LargestSectorGenerationAttackThresholdBlocks
 
 // A Processor processes all the messages in a block or tip set.
 type Processor interface {
 	// ProcessBlock processes all messages in a block.
-	ProcessBlock(ctx context.Context, st state.Tree, vms vm.StorageMap, blk *types.Block, ancestors []types.TipSet) ([]*ApplicationResult, error)
+	ProcessBlock(context.Context, state.Tree, vm.StorageMap, *types.Block, []*types.SignedMessage, []types.TipSet) ([]*ApplicationResult, error)
 
 	// ProcessTipSet processes all messages in a tip set.
-	ProcessTipSet(ctx context.Context, st state.Tree, vms vm.StorageMap, ts types.TipSet, ancestors []types.TipSet) (*ProcessTipSetResponse, error)
+	ProcessTipSet(context.Context, state.Tree, vm.StorageMap, types.TipSet, [][]*types.SignedMessage, []types.TipSet) (*ProcessTipSetResponse, error)
 }
 
 // Expected implements expected consensus.
@@ -76,6 +95,9 @@ type Expected struct {
 	// PwrTableView provides miner and total power for the EC chain weight
 	// computation.
 	PwrTableView PowerTableView
+
+	// validator provides a set of methods used to validate a block.
+	BlockValidator
 
 	// cstore is used for loading state trees during message running.
 	cstore *hamt.CborIpldStore
@@ -90,51 +112,31 @@ type Expected struct {
 
 	genesisCid cid.Cid
 
-	verifier proofs.Verifier
+	verifier verification.Verifier
+
+	blockTime time.Duration
 }
 
 // Ensure Expected satisfies the Protocol interface at compile time.
 var _ Protocol = (*Expected)(nil)
 
 // NewExpected is the constructor for the Expected consenus.Protocol module.
-func NewExpected(cs *hamt.CborIpldStore, bs blockstore.Blockstore, processor Processor, pt PowerTableView, gCid cid.Cid, verifier proofs.Verifier) Protocol {
+func NewExpected(cs *hamt.CborIpldStore, bs blockstore.Blockstore, processor Processor, v BlockValidator, pt PowerTableView, gCid cid.Cid, verifier verification.Verifier, bt time.Duration) *Expected {
 	return &Expected{
-		cstore:       cs,
-		bstore:       bs,
-		processor:    processor,
-		PwrTableView: pt,
-		genesisCid:   gCid,
-		verifier:     verifier,
+		cstore:         cs,
+		blockTime:      bt,
+		bstore:         bs,
+		processor:      processor,
+		PwrTableView:   pt,
+		genesisCid:     gCid,
+		verifier:       verifier,
+		BlockValidator: v,
 	}
 }
 
-// NewValidTipSet creates a new tipset from the input blocks that is guaranteed
-// to be valid. It operates by validating each block and further checking that
-// this tipset contains only blocks with the same heights, parent weights,
-// and parent sets.
-func (c *Expected) NewValidTipSet(ctx context.Context, blks []*types.Block) (types.TipSet, error) {
-	for _, blk := range blks {
-		if err := c.validateBlockStructure(ctx, blk); err != nil {
-			return nil, err
-		}
-	}
-	return types.NewTipSet(blks...)
-}
-
-// ValidateBlockStructure verifies that this block, on its own, is structurally and
-// cryptographically valid. This means checking that all of its fields are
-// properly filled out and its signatures are correct. Checking the validity of
-// state changes must be done separately and only once the state of the
-// previous block has been validated. TODO: not yet signature checking
-func (c *Expected) validateBlockStructure(ctx context.Context, b *types.Block) error {
-	// TODO: validate signature on block
-	ctx = log.Start(ctx, "Expected.validateBlockStructure")
-	log.LogKV(ctx, "ValidateBlockStructure", b.Cid().String())
-	if !b.StateRoot.Defined() {
-		return fmt.Errorf("block has nil StateRoot")
-	}
-
-	return nil
+// BlockTime returns the block time used by the consensus protocol.
+func (c *Expected) BlockTime() time.Duration {
+	return c.blockTime
 }
 
 // Weight returns the EC weight of this TipSet in uint64 encoded fixed point
@@ -142,7 +144,7 @@ func (c *Expected) validateBlockStructure(ctx context.Context, b *types.Block) e
 func (c *Expected) Weight(ctx context.Context, ts types.TipSet, pSt state.Tree) (uint64, error) {
 	ctx = log.Start(ctx, "Expected.Weight")
 	log.LogKV(ctx, "Weight", ts.String())
-	if len(ts) == 1 && ts.ToSlice()[0].Cid().Equals(c.genesisCid) {
+	if ts.Len() == 1 && ts.At(0).Cid().Equals(c.genesisCid) {
 		return uint64(0), nil
 	}
 	// Compute parent weight.
@@ -160,7 +162,7 @@ func (c *Expected) Weight(ctx context.Context, ts types.TipSet, pSt state.Tree) 
 	if err != nil {
 		return uint64(0), err
 	}
-	floatTotalBytes := new(big.Float).SetInt64(int64(totalBytes))
+	floatTotalBytes := new(big.Float).SetInt(totalBytes.BigInt())
 	floatECV := new(big.Float).SetInt64(int64(ECV))
 	floatECPrM := new(big.Float).SetInt64(int64(ECPrM))
 	for _, blk := range ts.ToSlice() {
@@ -168,7 +170,7 @@ func (c *Expected) Weight(ctx context.Context, ts types.TipSet, pSt state.Tree) 
 		if err != nil {
 			return uint64(0), err
 		}
-		floatOwnBytes := new(big.Float).SetInt64(int64(minerBytes))
+		floatOwnBytes := new(big.Float).SetInt(minerBytes.BigInt())
 		wBlk := new(big.Float)
 		wBlk.Quo(floatOwnBytes, floatTotalBytes)
 		wBlk.Mul(wBlk, floatECPrM) // Power addition
@@ -185,7 +187,22 @@ func (c *Expected) Weight(ctx context.Context, ts types.TipSet, pSt state.Tree) 
 // concatenation of block cids in the tipset.
 // TODO BLOCK CID CONCAT TIE BREAKER IS NOT IN THE SPEC AND SHOULD BE
 // EVALUATED BEFORE GETTING TO PRODUCTION.
-func (c *Expected) IsHeavier(ctx context.Context, a, b types.TipSet, aSt, bSt state.Tree) (bool, error) {
+func (c *Expected) IsHeavier(ctx context.Context, a, b types.TipSet, aStateID, bStateID cid.Cid) (bool, error) {
+	var aSt, bSt state.Tree
+	var err error
+	if aStateID.Defined() {
+		aSt, err = c.loadStateTree(ctx, aStateID)
+		if err != nil {
+			return false, err
+		}
+	}
+	if bStateID.Defined() {
+		bSt, err = c.loadStateTree(ctx, bStateID)
+		if err != nil {
+			return false, err
+		}
+	}
+
 	aW, err := c.Weight(ctx, a, aSt)
 	if err != nil {
 		return false, err
@@ -227,77 +244,57 @@ func (c *Expected) IsHeavier(ctx context.Context, a, b types.TipSet, aSt, bSt st
 	return cmp == 1, nil
 }
 
-// RunStateTransition is the chain transition function that goes from a
-// starting state and a tipset to a new state.  It errors if the tipset was not
-// mined according to the EC rules, or if running the messages in the tipset
-// results in an error.
-func (c *Expected) RunStateTransition(ctx context.Context, ts types.TipSet, ancestors []types.TipSet, pSt state.Tree) (state.Tree, error) {
-	err := c.validateMining(ctx, pSt, ts, ancestors[0])
-	if err != nil {
-		return nil, err
+// RunStateTransition applies the messages in a tipset to a state, and persists that new state.
+// It errors if the tipset was not mined according to the EC rules, or if any of the messages
+// in the tipset results in an error.
+func (c *Expected) RunStateTransition(ctx context.Context, ts types.TipSet, tsMessages [][]*types.SignedMessage, tsReceipts [][]*types.MessageReceipt, ancestors []types.TipSet, priorStateID cid.Cid) (root cid.Cid, err error) {
+	ctx, span := trace.StartSpan(ctx, "Expected.RunStateTransition")
+	span.AddAttributes(trace.StringAttribute("tipset", ts.String()))
+	defer tracing.AddErrorEndSpan(ctx, span, &err)
+
+	for i := 0; i < ts.Len(); i++ {
+		if err := c.BlockValidator.ValidateSemantic(ctx, ts.At(i), &ancestors[0]); err != nil {
+			return cid.Undef, err
+		}
 	}
 
-	sl := ts.ToSlice()
-	one := sl[0]
-	for _, blk := range sl[1:] {
-		if blk.Parents.String() != one.Parents.String() {
-			log.Error("invalid parents", blk.Parents.String(), one.Parents.String(), blk)
-			panic("invalid parents")
-		}
-		if blk.Height != one.Height {
-			log.Error("invalid height", blk.Height, one.Height, blk)
-			panic("invalid height")
-		}
+	priorState, err := c.loadStateTree(ctx, priorStateID)
+	if err != nil {
+		return cid.Undef, err
+	}
+
+	if err := c.validateMining(ctx, priorState, ts, ancestors[0]); err != nil {
+		return cid.Undef, err
 	}
 
 	vms := vm.NewStorageMap(c.bstore)
-	st, err := c.runMessages(ctx, pSt, vms, ts, ancestors)
+	st, err := c.runMessages(ctx, priorState, vms, ts, tsMessages, tsReceipts, ancestors)
 	if err != nil {
-		return nil, err
+		return cid.Undef, err
 	}
 	err = vms.Flush()
 	if err != nil {
-		return nil, err
+		return cid.Undef, err
 	}
-	return st, nil
+
+	return st.Flush(ctx)
 }
 
 // validateMining checks validity of the block ticket, proof, and miner address.
 //    Returns an error if:
 //    	* any tipset's block was mined by an invalid miner address.
 //      * the block proof is invalid for the challenge
-//      * the block ticket is incorrectly computed
 //      * the block ticket fails the power check, i.e. is not a winning ticket
 //    Returns nil if all the above checks pass.
 // See https://github.com/filecoin-project/specs/blob/master/mining.md#chain-validation
 func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts types.TipSet, parentTs types.TipSet) error {
-	for _, blk := range ts.ToSlice() {
-		parentHeight, err := parentTs.Height()
-		if err != nil {
-			return errors.Wrap(err, "failed to get parentHeight")
-		}
-
-		nullBlockCount := uint64(blk.Height) - parentHeight - 1
-		challengeSeed, err := CreateChallengeSeed(parentTs, nullBlockCount)
-		if err != nil {
-			return errors.Wrap(err, "couldn't create challengeSeed")
-		}
-
-		isValid, err := proofs.IsPoStValidWithVerifier(c.verifier, []proofs.CommR{}, challengeSeed, []uint64{}, blk.Proof)
-		if err != nil {
-			return errors.Wrap(err, "could not test the proof's validity")
-		}
-		if !isValid {
-			return errors.New("invalid proof")
-		}
-
-		computedTicket := CreateTicket(blk.Proof, blk.Miner)
-
-		if !bytes.Equal(blk.Ticket, computedTicket) {
-			return errors.New("ticket incorrectly computed")
-		}
-
+	for i := 0; i < ts.Len(); i++ {
+		blk := ts.At(i)
 		// TODO: Also need to validate BlockSig
+
+		// TODO: Once we've picked a delay function (see #2119), we need to
+		// verify its proof here. The proof will likely be written to a field on
+		// the mined block.
 
 		// See https://github.com/filecoin-project/specs/blob/master/mining.md#ticket-checking
 		result, err := IsWinningTicket(ctx, c.bstore, c.PwrTableView, st, blk.Ticket, blk.Miner)
@@ -314,7 +311,8 @@ func (c *Expected) validateMining(ctx context.Context, st state.Tree, ts types.T
 
 // IsWinningTicket fetches miner power & total power, returns true if it's a winning ticket, false if not,
 //    errors out if minerPower or totalPower can't be found.
-//    See https://github.com/filecoin-project/aq/issues/70 for an explanation of the math here.
+//    See https://github.com/filecoin-project/specs/blob/master/expected-consensus.md
+//    for an explanation of the math here.
 func IsWinningTicket(ctx context.Context, bs blockstore.Blockstore, ptv PowerTableView, st state.Tree,
 	ticket types.Signature, miner address.Address) (bool, error) {
 
@@ -333,12 +331,12 @@ func IsWinningTicket(ctx context.Context, bs blockstore.Blockstore, ptv PowerTab
 
 // CompareTicketPower abstracts the actual comparison logic so it can be used by some test
 // helpers
-func CompareTicketPower(ticket types.Signature, minerPower uint64, totalPower uint64) bool {
+func CompareTicketPower(ticket types.Signature, minerPower *types.BytesAmount, totalPower *types.BytesAmount) bool {
 	lhs := &big.Int{}
 	lhs.SetBytes(ticket)
-	lhs.Mul(lhs, big.NewInt(int64(totalPower)))
+	lhs.Mul(lhs, totalPower.BigInt())
 	rhs := &big.Int{}
-	rhs.Mul(big.NewInt(int64(minerPower)), ticketDomain)
+	rhs.Mul(minerPower.BigInt(), ticketDomain)
 	return lhs.Cmp(rhs) < 0
 }
 
@@ -346,10 +344,10 @@ func CompareTicketPower(ticket types.Signature, minerPower uint64, totalPower ui
 //   TODO -- in general this won't work with only the base tipset.
 //     We'll potentially need some chain manager utils, similar to
 //     the State function, to sample further back in the chain.
-func CreateChallengeSeed(parents types.TipSet, nullBlkCount uint64) (proofs.PoStChallengeSeed, error) {
+func CreateChallengeSeed(parents types.TipSet, nullBlkCount uint64) (types.PoStChallengeSeed, error) {
 	smallest, err := parents.MinTicket()
 	if err != nil {
-		return proofs.PoStChallengeSeed{}, err
+		return types.PoStChallengeSeed{}, err
 	}
 
 	buf := make([]byte, binary.MaxVarintLen64)
@@ -360,19 +358,6 @@ func CreateChallengeSeed(parents types.TipSet, nullBlkCount uint64) (proofs.PoSt
 	return h, nil
 }
 
-// CreateTicket computes a valid ticket using the supplied proof
-// []byte and the minerAddress address.Address.
-//    returns:  []byte -- the ticket.
-func CreateTicket(proof proofs.PoStProof, minerAddr address.Address) []byte {
-	// TODO: the ticket is supposed to be a signature, per the spec.
-	// For now to ensure that the ticket is unique to each miner mix in
-	// the miner address.
-	// https://github.com/filecoin-project/go-filecoin/issues/1054
-	buf := append(proof[:], minerAddr.Bytes()...)
-	h := sha256.Sum256(buf)
-	return h[:]
-}
-
 // runMessages applies the messages of all blocks within the input
 // tipset to the input base state.  Messages are applied block by
 // block with blocks sorted by their ticket bytes.  The output state must be
@@ -381,28 +366,28 @@ func CreateTicket(proof proofs.PoStProof, minerAddr address.Address) []byte {
 // An error is returned if individual blocks contain messages that do not
 // lead to successful state transitions.  An error is also returned if the node
 // faults while running aggregate state computation.
-func (c *Expected) runMessages(ctx context.Context, st state.Tree, vms vm.StorageMap, ts types.TipSet, ancestors []types.TipSet) (state.Tree, error) {
+func (c *Expected) runMessages(ctx context.Context, st state.Tree, vms vm.StorageMap, ts types.TipSet, tsMessages [][]*types.SignedMessage, tsReceipts [][]*types.MessageReceipt, ancestors []types.TipSet) (state.Tree, error) {
 	var cpySt state.Tree
 
-	// TODO: order blocks in the tipset by ticket
 	// TODO: don't process messages twice
-	for _, blk := range ts.ToSlice() {
+	for i := 0; i < ts.Len(); i++ {
+		blk := ts.At(i)
 		cpyCid, err := st.Flush(ctx)
 		if err != nil {
 			return nil, errors.Wrap(err, "error validating block state")
 		}
 		// state copied so changes don't propagate between block validations
-		cpySt, err = state.LoadStateTree(ctx, c.cstore, cpyCid, builtin.Actors)
+		cpySt, err = c.loadStateTree(ctx, cpyCid)
 		if err != nil {
 			return nil, errors.Wrap(err, "error validating block state")
 		}
 
-		receipts, err := c.processor.ProcessBlock(ctx, cpySt, vms, blk, ancestors)
+		receipts, err := c.processor.ProcessBlock(ctx, cpySt, vms, blk, tsMessages[i], ancestors)
 		if err != nil {
 			return nil, errors.Wrap(err, "error validating block state")
 		}
 		// TODO: check that receipts actually match
-		if len(receipts) != len(blk.MessageReceipts) {
+		if len(receipts) != len(tsReceipts[i]) {
 			return nil, fmt.Errorf("found invalid message receipts: %v %v", receipts, blk.MessageReceipts)
 		}
 
@@ -414,16 +399,32 @@ func (c *Expected) runMessages(ctx context.Context, st state.Tree, vms vm.Storag
 			return nil, ErrStateRootMismatch
 		}
 	}
-	if len(ts) == 1 { // block validation state == aggregate parent state
+	if ts.Len() <= 1 { // block validation state == aggregate parent state
 		return cpySt, nil
 	}
 	// multiblock tipsets require reapplying messages to get aggregate state
 	// NOTE: It is possible to optimize further by applying block validation
 	// in sorted order to reuse first block transitions as the starting state
 	// for the tipSetProcessor.
-	_, err := c.processor.ProcessTipSet(ctx, st, vms, ts, ancestors)
+	_, err := c.processor.ProcessTipSet(ctx, st, vms, ts, tsMessages, ancestors)
 	if err != nil {
 		return nil, errors.Wrap(err, "error validating tipset")
 	}
 	return st, nil
+}
+
+func (c *Expected) loadStateTree(ctx context.Context, id cid.Cid) (state.Tree, error) {
+	return state.LoadStateTree(ctx, c.cstore, id, builtin.Actors)
+}
+
+// CreateTicket computes a valid ticket.
+// 	params:  proof  []byte, the proof to sign
+// 			 signerAddr address.Address, the the signer's address. Must exist in the wallet
+//      	 signer, implements TicketSigner interface. Must have signerPubKey in its keyinfo.
+//  returns:  types.Signature ( []byte ), error
+func CreateTicket(proof types.PoStProof, signerAddr address.Address, signer TicketSigner) (types.Signature, error) {
+
+	buf := append(proof[:], signerAddr.Bytes()...)
+	// Don't hash it here; it gets hashed in walletutil.Sign
+	return signer.SignBytes(buf[:], signerAddr)
 }

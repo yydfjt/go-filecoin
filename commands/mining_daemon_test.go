@@ -1,38 +1,39 @@
-package commands
+package commands_test
 
 import (
 	"math/big"
 	"strings"
 	"testing"
 
-	"github.com/filecoin-project/go-filecoin/fixtures"
-	th "github.com/filecoin-project/go-filecoin/testhelpers"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/filecoin-project/go-filecoin/fixtures"
+	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
 )
 
-func parseInt(assert *assert.Assertions, s string) *big.Int {
+func parseInt(t *testing.T, s string) *big.Int {
 	i := new(big.Int)
 	i, err := i.SetString(strings.TrimSpace(s), 10)
-	assert.True(err, "couldn't parse as big.Int %q", s)
+	assert.True(t, err, "couldn't parse as big.Int %q", s)
 	return i
 }
 
 func TestMiningGenBlock(t *testing.T) {
-	t.Parallel()
-	assert := assert.New(t)
-	d := th.NewDaemon(t, th.WithMiner(fixtures.TestMiners[0]), th.KeyFile(fixtures.KeyFilePaths()[0])).Start()
+	tf.IntegrationTest(t)
+
+	d := makeTestDaemonWithMinerAndStart(t)
 	defer d.ShutdownSuccess()
 
-	addr := fixtures.TestMiners[0]
+	addr := fixtures.TestAddresses[0]
 
 	s := d.RunSuccess("wallet", "balance", addr)
-	beforeBalance := parseInt(assert, s.ReadStdout())
+	beforeBalance := parseInt(t, s.ReadStdout())
 
 	d.RunSuccess("mining", "once")
 
 	s = d.RunSuccess("wallet", "balance", addr)
-	afterBalance := parseInt(assert, s.ReadStdout())
+	afterBalance := parseInt(t, s.ReadStdout())
 	sum := new(big.Int)
 
-	assert.True(sum.Add(beforeBalance, big.NewInt(1000)).Cmp(afterBalance) == 0)
+	assert.Equal(t, sum.Add(beforeBalance, big.NewInt(1000)), afterBalance)
 }

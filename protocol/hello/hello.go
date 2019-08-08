@@ -5,17 +5,22 @@ import (
 	"fmt"
 	"time"
 
-	ma "gx/ipfs/QmNTCey11oxhb1AxDnQBRHtdhap6Ctud872NjAYPYYXPuc/go-multiaddr"
-	net "gx/ipfs/QmNgLg1NTw37iWbYPKcyK85YJ9Whs1MkPtJwhfqbNYAyKg/go-libp2p-net"
-	cid "gx/ipfs/QmR8BauakNcBa3RbE4nbQu76PDiJgoQgz8AJdhJuiU4TAw/go-cid"
-	cbor "gx/ipfs/QmRoARq3nkUb13HSKZGepCZSWe5GrVPwx7xURJGZ7KWv9V/go-ipld-cbor"
-	peer "gx/ipfs/QmY5Grm8pJdiSSVsYxx4uNRgweY72EmYwuSDbRnbFok3iY/go-libp2p-peer"
-	host "gx/ipfs/QmaoXrM4Z41PD48JY36YqQGKQpLGjyLA2cKcLsES7YddAq/go-libp2p-host"
-	logging "gx/ipfs/QmcuXC5cxs79ro2cUuHs4HQ2bkDLJUYokwL8aivcX6HW3C/go-log"
+	cid "github.com/ipfs/go-cid"
+	cbor "github.com/ipfs/go-ipld-cbor"
+	logging "github.com/ipfs/go-log"
+	host "github.com/libp2p/go-libp2p-core/host"
+	net "github.com/libp2p/go-libp2p-core/network"
+	peer "github.com/libp2p/go-libp2p-core/peer"
+	ma "github.com/multiformats/go-multiaddr"
 
 	cbu "github.com/filecoin-project/go-filecoin/cborutil"
+	"github.com/filecoin-project/go-filecoin/metrics"
 	"github.com/filecoin-project/go-filecoin/types"
 )
+
+var versionErrCt = metrics.NewInt64Counter("hello_version_error", "Number of errors encountered in hello protocol due to incorrect version")
+var genesisErrCt = metrics.NewInt64Counter("hello_genesis_error", "Number of errors encountered in hello protocol due to incorrect genesis block")
+var helloMsgErrCt = metrics.NewInt64Counter("hello_message_error", "Number of errors encountered in hello protocol due to malformed message")
 
 func init() {
 	cbor.RegisterCborType(Message{})
@@ -28,14 +33,15 @@ var log = logging.Logger("/fil/hello")
 
 // Message is the data structure of a single message in the hello protocol.
 type Message struct {
-	HeaviestTipSetCids   []cid.Cid
+	HeaviestTipSetCids   types.TipSetKey
 	HeaviestTipSetHeight uint64
 	GenesisHash          cid.Cid
+	CommitSha            string
 }
 
-type syncCallback func(from peer.ID, cids []cid.Cid, height uint64)
+type helloCallback func(ci *types.ChainInfo)
 
-type getTipSetFunc func() types.TipSet
+type getTipSetFunc func() (types.TipSet, error)
 
 // Handler implements the 'Hello' protocol handler. Upon connecting to a new
 // node, we send them a message containing some information about the state of
@@ -46,22 +52,27 @@ type Handler struct {
 
 	genesis cid.Cid
 
-	// chainSyncCB is called when new peers tell us about their chain
-	chainSyncCB syncCallback
+	// callBack is called when new peers tell us about their chain
+	callBack helloCallback
 
-	// getHeaviestTipSet is used to retrieve the current heaviest tipset
+	//  is used to retrieve the current heaviest tipset
 	// for filling out our hello messages.
 	getHeaviestTipSet getTipSetFunc
+
+	net       string
+	commitSha string
 }
 
 // New creates a new instance of the hello protocol and registers it to
 // the given host, with the provided callbacks.
-func New(h host.Host, gen cid.Cid, syncCallback syncCallback, getHeaviestTipSet getTipSetFunc) *Handler {
+func New(h host.Host, gen cid.Cid, helloCallback helloCallback, getHeaviestTipSet getTipSetFunc, net string, commitSha string) *Handler {
 	hello := &Handler{
 		host:              h,
 		genesis:           gen,
-		chainSyncCB:       syncCallback,
+		callBack:          helloCallback,
 		getHeaviestTipSet: getHeaviestTipSet,
+		net:               net,
+		commitSha:         commitSha,
 	}
 	h.SetStreamHandler(protocol, hello.handleNewStream)
 
@@ -78,13 +89,21 @@ func (h *Handler) handleNewStream(s net.Stream) {
 
 	var hello Message
 	if err := cbu.NewMsgReader(s).ReadMsg(&hello); err != nil {
-		log.Warningf("bad hello message from peer %s: %s", from, err)
+		log.Debugf("bad hello message from peer %s: %s", from, err)
+		helloMsgErrCt.Inc(context.TODO(), 1)
+		s.Conn().Close() // nolint: errcheck
 		return
 	}
 
 	switch err := h.processHelloMessage(from, &hello); err {
 	case ErrBadGenesis:
-		log.Warningf("genesis cid: %s does not match: %s, disconnecting from peer: %s", &hello.GenesisHash, h.genesis, from)
+		log.Debugf("genesis cid: %s does not match: %s, disconnecting from peer: %s", &hello.GenesisHash, h.genesis, from)
+		genesisErrCt.Inc(context.TODO(), 1)
+		s.Conn().Close() // nolint: errcheck
+		return
+	case ErrWrongVersion:
+		log.Debugf("code not at same version: peer has version %s, daemon has version %s, disconnecting from peer: %s", hello.CommitSha, h.commitSha, from)
+		versionErrCt.Inc(context.TODO(), 1)
 		s.Conn().Close() // nolint: errcheck
 		return
 	case nil: // ok, noop
@@ -93,20 +112,30 @@ func (h *Handler) handleNewStream(s net.Stream) {
 	}
 }
 
-// ErrBadGenesis is the error returned when a missmatch in genesis blocks happens.
+// ErrBadGenesis is the error returned when a mismatch in genesis blocks happens.
 var ErrBadGenesis = fmt.Errorf("bad genesis block")
+
+// ErrWrongVersion is the error returned when a mismatch in the code version happens.
+var ErrWrongVersion = fmt.Errorf("code version mismatch")
 
 func (h *Handler) processHelloMessage(from peer.ID, msg *Message) error {
 	if !msg.GenesisHash.Equals(h.genesis) {
 		return ErrBadGenesis
 	}
+	if (h.net == "devnet-staging" || h.net == "devnet-user") && msg.CommitSha != h.commitSha {
+		return ErrWrongVersion
+	}
 
-	h.chainSyncCB(from, msg.HeaviestTipSetCids, msg.HeaviestTipSetHeight)
+	ci := types.NewChainInfo(from, msg.HeaviestTipSetCids, msg.HeaviestTipSetHeight)
+	h.callBack(ci)
 	return nil
 }
 
 func (h *Handler) getOurHelloMessage() *Message {
-	heaviest := h.getHeaviestTipSet()
+	heaviest, err := h.getHeaviestTipSet()
+	if err != nil {
+		panic("cannot fetch chain head")
+	}
 	height, err := heaviest.Height()
 	if err != nil {
 		panic("somehow heaviest tipset is empty")
@@ -114,8 +143,9 @@ func (h *Handler) getOurHelloMessage() *Message {
 
 	return &Message{
 		GenesisHash:          h.genesis,
-		HeaviestTipSetCids:   heaviest.ToSortedCidSet().ToSlice(),
+		HeaviestTipSetCids:   heaviest.Key(),
 		HeaviestTipSetHeight: height,
+		CommitSha:            h.commitSha,
 	}
 }
 
